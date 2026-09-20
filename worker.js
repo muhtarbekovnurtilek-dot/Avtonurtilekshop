@@ -178,7 +178,7 @@ const T = {
     lang_set: "Язык изменён на Русский",
     support_text: "По всем вопросам пишите в поддержку: @nurtilek_support",
     channel_text: "Наш канал: @nurtilek_shop",
-    reviews_text: "Отзывы наших клиентов: @nurtilek_reviews",
+    reviews_text: "Отзывы наших клиентов: https://t.me/nurtilekshop",
     admin_panel: "⚙️ Админ-панель",
     admin_only: "⛔ Доступ запрещён.",
     processing: "⏳ Заказ обрабатывается.",
@@ -187,6 +187,19 @@ const T = {
     refunded: "💸 Средства возвращены на кошелёк.",
     insufficient_balance: "❌ Недостаточно средств на балансе.",
     kg_som: "сом",
+    btn_referral: "🤝 Рефералка",
+    btn_pay_balance: "💰 С баланса",
+    btn_pay_bank: "🏦 Банк",
+    btn_pay_terminal: "🧾 Терминал",
+    choose_payment_method: "Выберите способ оплаты:",
+    terminal_instructions:
+      "Нажмите кнопку ниже — откроется личный чат с администратором с уже готовым текстом. Просто отправьте его и приложите чек об оплате.",
+    terminal_dm_button: "📩 Написать администратору",
+    order_completed_review_hint: "Будем рады, если оставите отзыв 🙂",
+    btn_leave_review: "⭐ Оставить отзыв",
+    referral_rate_line: (p) => `Ваша текущая ставка: ${p}%`,
+    referral_link_label: "Ваша реферальная ссылка",
+    referral_earned_label: "Заработано с рефералов",
   },
   kg: {
     main_menu: "Nurtilek Shop башкы менюсу 🛍",
@@ -246,7 +259,7 @@ const T = {
     lang_set: "Тил Кыргызча кылып өзгөртүлдү",
     support_text: "Суроолор боюнча колдоого жазыңыз: @nurtilek_support",
     channel_text: "Биздин канал: @nurtilek_shop",
-    reviews_text: "Кардарлардын пикирлери: @nurtilek_reviews",
+    reviews_text: "Кардарлардын пикирлери: https://t.me/nurtilekshop",
     admin_panel: "⚙️ Админ панели",
     admin_only: "⛔ Уруксат жок.",
     processing: "⏳ Буйрутма иштелүүдө.",
@@ -255,6 +268,19 @@ const T = {
     refunded: "💸 Каражат капчыкка кайтарылды.",
     insufficient_balance: "❌ Баланста каражат жетишсиз.",
     kg_som: "сом",
+    btn_referral: "🤝 Рефералка",
+    btn_pay_balance: "💰 Баланстан",
+    btn_pay_bank: "🏦 Банк",
+    btn_pay_terminal: "🧾 Терминал",
+    choose_payment_method: "Төлөм ыкмасын тандаңыз:",
+    terminal_instructions:
+      "Төмөнкү баскычты басыңыз — администратор менен даяр текст менен жеке чат ачылат. Аны жөнөтүп, төлөм чегин тиркеңиз.",
+    terminal_dm_button: "📩 Администраторго жазуу",
+    order_completed_review_hint: "Пикир калтырсаңыз кубанычтабыз 🙂",
+    btn_leave_review: "⭐ Пикир калтыруу",
+    referral_rate_line: (p) => `Учурдагы чегиңиз: ${p}%`,
+    referral_link_label: "Сиздин реферал шилтемеңиз",
+    referral_earned_label: "Рефералдардан тапкан",
   },
 };
 
@@ -389,6 +415,49 @@ function kvKeyCounter(dateStr) {
 function kvKeyRoblox() {
   return `catalog:roblox`;
 }
+function kvKeyConfig(key) {
+  return `config:${key}`;
+}
+function kvKeyReferralOverride(username) {
+  return `config:referral_percent_user:${(username || "").toLowerCase()}`;
+}
+
+const DEFAULT_REFERRAL_PERCENT = "0.5";
+const DEFAULT_REFERRAL_TEXT_RU =
+  "Если вы позовёте друга, вы будете получать {percent}% от каждой его покупки в магазине.\n\nЕсли хотите стать крупным партнёром с повышенным процентом (например, 1–1.5%) — свяжитесь с администрацией.";
+const DEFAULT_REFERRAL_TEXT_KG =
+  "Досуңузду чакырсаңыз, анын ар бир сатып алуусунан {percent}% аласыз.\n\nЖогорку пайыздуу ири өнөктөш болгуңуз келсе (мисалы, 1–1.5%) — администрация менен байланышыңыз.";
+
+async function getReferralPercentForUsername(db, username) {
+  if (username) {
+    const override = await db.get(kvKeyReferralOverride(username));
+    if (override) return parseFloat(override);
+  }
+  const global = await db.get(kvKeyConfig("referral_percent"));
+  return parseFloat(global || DEFAULT_REFERRAL_PERCENT);
+}
+
+async function getReferralText(db, lang) {
+  const stored = await db.get(kvKeyConfig("referral_text"));
+  return stored || (lang === "kg" ? DEFAULT_REFERRAL_TEXT_KG : DEFAULT_REFERRAL_TEXT_RU);
+}
+
+/**
+ * Credits the referrer of `buyerUserId` with a percentage of a completed purchase.
+ * Only triggered on actual product purchases (never on wallet top-ups).
+ */
+async function applyReferralCommission(db, buyerUserId, saleAmount) {
+  const buyer = await getUser(db, buyerUserId);
+  if (!buyer.referredBy) return;
+  const referrer = await getUser(db, buyer.referredBy);
+  const percent = await getReferralPercentForUsername(db, referrer.username);
+  const commission = Math.round(saleAmount * (percent / 100) * 100) / 100;
+  if (commission <= 0) return;
+  referrer.balance += commission;
+  referrer.referralEarnings = (referrer.referralEarnings || 0) + commission;
+  await saveUser(db, referrer);
+  await addWalletHistory(db, referrer.id, { type: "referral", amount: commission, from: buyerUserId });
+}
 
 async function getJSON(db, key, fallback = null) {
   const v = await db.get(key);
@@ -412,6 +481,8 @@ async function getUser(db, id) {
       lang: "ru",
       balance: 0,
       spent: 0,
+      referredBy: null,
+      referralEarnings: 0,
       createdAt: new Date().toISOString(),
     };
     await putJSON(db, kvKeyUser(id), u);
@@ -714,6 +785,7 @@ function mainMenuKeyboard(lang) {
     [btn(t(lang, "btn_roblox"), "cat:roblox")],
     [btn(t(lang, "btn_wallet"), "wallet:home"), btn(t(lang, "btn_orders"), "orders:list")],
     [btn(t(lang, "btn_promo"), "promo:enter"), btn(t(lang, "btn_profile"), "profile:home")],
+    [btn(t(lang, "btn_referral"), "referral:home")],
     [btn(t(lang, "btn_reviews"), "info:reviews"), btn(t(lang, "btn_channel"), "info:channel")],
     [btn(t(lang, "btn_support"), "info:support"), btn(t(lang, "btn_lang"), "lang:menu")],
   ]);
@@ -754,6 +826,15 @@ async function categoryKeyboard(db, lang, catKey) {
 
 function confirmKeyboard(lang, confirmData, cancelData) {
   return ikb([[btn(t(lang, "btn_confirm"), confirmData), btn(t(lang, "btn_cancel"), cancelData)]]);
+}
+
+function paymentMethodKeyboard(lang, orderId) {
+  return ikb([
+    [btn(t(lang, "btn_pay_balance"), `confirmorder:${orderId}`)],
+    [btn(t(lang, "btn_pay_bank"), `payorder:bank:${orderId}`)],
+    [btn(t(lang, "btn_pay_terminal"), `payorder:terminal:${orderId}`)],
+    [btn(t(lang, "btn_cancel"), `cancelorder:${orderId}`)],
+  ]);
 }
 
 function backHomeKeyboard(lang) {
@@ -910,6 +991,7 @@ async function handleCallbackQuery(env, db, cq) {
       await saveOrder(db, order);
       await walletCommitSpend(db, userId, order.total, order.orderNumber);
       if (order.promoCode) await consumePromo(db, order.promoCode, userId);
+      await applyReferralCommission(db, userId, order.total);
 
       await editMessage(
         env,
@@ -935,6 +1017,70 @@ async function handleCallbackQuery(env, db, cq) {
       await clearState(db, userId);
       await renderMainMenu(env, db, chatId, messageId, lang);
       return answerCallback(env, cq.id);
+    }
+
+    if (ns === "payorder") {
+      const method = a;
+      const orderId = b;
+      const order = await getOrder(db, orderId);
+      if (!order || order.userId !== userId || order.status !== "pending_payment") {
+        await answerCallback(env, cq.id, t(lang, "invalid_input"), true);
+        return;
+      }
+      await answerCallback(env, cq.id);
+
+      if (method === "bank") {
+        const botInfo = await tgCall(env, "getMe", {});
+        const redirectUrl =
+          botInfo.ok && botInfo.result.username ? `https://t.me/${botInfo.result.username}` : env.APP_BASE_URL;
+        const payment = await createFinikPayment(env, {
+          amount: order.total,
+          paymentId: order.internalId,
+          redirectUrl,
+          description: `Nurtilek Shop order ${order.orderNumber}`,
+          lang,
+        });
+        if (!payment.ok) {
+          await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+          return;
+        }
+        await sendMessage(env, chatId, `№ ${order.orderNumber} — ${order.total} ${t(lang, "kg_som")}`, {
+          inline_keyboard: [
+            [{ text: "💳 Оплатить", url: payment.paymentUrl }],
+            [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
+          ],
+        });
+        return;
+      }
+
+      if (method === "terminal") {
+        const uidLines = Object.entries(order.uidData)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join("\n");
+        const messageText = [
+          `Здравствуйте! Хочу оформить заказ Nurtilek Shop.`,
+          `Заказ: ${order.orderNumber}`,
+          `Товар: ${order.itemName}`,
+          `Сумма: ${order.total} ${t(lang, "kg_som")}`,
+          uidLines,
+        ].join("\n");
+
+        await sendMessage(env, chatId, t(lang, "terminal_instructions"), {
+          inline_keyboard: [
+            [{ text: t(lang, "terminal_dm_button"), url: `https://t.me/${env.ADMIN_USERNAME}?text=${encodeURIComponent(messageText)}` }],
+            [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
+          ],
+        });
+
+        await sendMessage(
+          env,
+          env.ADMIN_ID,
+          `🧾 Заказ ожидает оплаты через терминал\n№ ${order.orderNumber}\n${order.itemName}\nСумма: ${order.total} ${t(lang, "kg_som")}\nUser: ${userId} (@${user.username || "-"})\n${uidLines}`,
+          ikb([[btn("✅ Оплата получена", `admin:orderpayok:${order.internalId}`)]])
+        );
+        return;
+      }
+      return;
     }
 
     if (ns === "wallet") {
@@ -971,6 +1117,27 @@ async function handleCallbackQuery(env, db, cq) {
         `${t(lang, "profile_spent")}: ${u.spent} ${t(lang, "kg_som")}`,
       ].join("\n");
       await editMessage(env, chatId, messageId, text, profileKeyboard(lang));
+      return answerCallback(env, cq.id);
+    }
+
+    if (ns === "referral") {
+      const u = await getUser(db, userId);
+      const percent = await getReferralPercentForUsername(db, u.username);
+      const template = await getReferralText(db, lang);
+      const description = template.replace(/\{percent\}/g, String(percent));
+      const botInfo = await tgCall(env, "getMe", {});
+      const refLink =
+        botInfo.ok && botInfo.result.username
+          ? `https://t.me/${botInfo.result.username}?start=ref_${userId}`
+          : "—";
+      const text = [
+        description,
+        "",
+        t(lang, "referral_rate_line", percent),
+        `${t(lang, "referral_link_label")}:\n${refLink}`,
+        `${t(lang, "referral_earned_label")}: ${u.referralEarnings || 0} ${t(lang, "kg_som")}`,
+      ].join("\n");
+      await editMessage(env, chatId, messageId, text, backHomeKeyboard(lang));
       return answerCallback(env, cq.id);
     }
 
@@ -1105,7 +1272,19 @@ async function handleDonixStatusUpdate(env, db, externalId, status) {
   } else if (status === "completed") {
     order.status = "completed";
     await saveOrder(db, order);
-    await sendMessage(env, user.id, `${t(lang, "completed")}\n№ ${order.orderNumber}`, backHomeKeyboard(lang));
+    const completedText = [
+      t(lang, "completed"),
+      `№ ${order.orderNumber}`,
+      order.itemName,
+      "",
+      t(lang, "order_completed_review_hint"),
+    ].join("\n");
+    await sendMessage(env, user.id, completedText, {
+      inline_keyboard: [
+        [{ text: t(lang, "btn_leave_review"), url: "https://t.me/nurtilekshop" }],
+        [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
+      ],
+    });
   } else if (status === "failed") {
     order.status = "failed";
     await saveOrder(db, order);
@@ -1152,13 +1331,27 @@ async function handleMessage(env, db, msg) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const text = (msg.text || "").trim();
+
+  const existingUserRecord = await getJSON(db, kvKeyUser(userId));
+  const isNewUser = !existingUserRecord;
+
   const user = await getUser(db, userId);
   if (msg.from.username) user.username = msg.from.username;
   await saveUser(db, user);
   const lang = user.lang || "ru";
 
-  if (text === "/start") {
+  if (text.startsWith("/start")) {
     await clearState(db, userId);
+    if (isNewUser) {
+      const payload = text.slice(6).trim();
+      if (payload.startsWith("ref_")) {
+        const refId = payload.slice(4).trim();
+        if (refId && String(refId) !== String(userId)) {
+          user.referredBy = refId;
+          await saveUser(db, user);
+        }
+      }
+    }
     await sendMessage(env, chatId, t(lang, "main_menu"), mainMenuKeyboard(lang));
     return;
   }
@@ -1214,7 +1407,9 @@ async function handleMessage(env, db, msg) {
       promoCode: prompt.promoCode,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, prompt.text, confirmKeyboard(lang, `confirmorder:${order.internalId}`, `cancelorder:${order.internalId}`));
+    await sendMessage(env, chatId, `${prompt.text}
+
+${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
     return;
   }
 
@@ -1261,7 +1456,9 @@ async function handleMessage(env, db, msg) {
       promoCode: prompt.promoCode,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, prompt.text, confirmKeyboard(lang, `confirmorder:${order.internalId}`, `cancelorder:${order.internalId}`));
+    await sendMessage(env, chatId, `${prompt.text}
+
+${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
     return;
   }
 
@@ -1300,7 +1497,9 @@ async function handleMessage(env, db, msg) {
       promoCode: prompt.promoCode,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, prompt.text, confirmKeyboard(lang, `confirmorder:${order.internalId}`, `cancelorder:${order.internalId}`));
+    await sendMessage(env, chatId, `${prompt.text}
+
+${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
     return;
   }
 
@@ -1377,6 +1576,7 @@ function adminMainKeyboard() {
     [btn("📊 Статистика", "admin:stats"), btn("👥 Пользователи", "admin:users")],
     [btn("📦 Заказы", "admin:orders"), btn("💰 Кошельки", "admin:wallets")],
     [btn("🎮 Каталог", "admin:catalog"), btn("🎟 Промокоды", "admin:promos")],
+    [btn("🤝 Рефералка", "admin:referral")],
     [btn("📢 Рассылка", "admin:broadcast"), btn("💳 Donix Balance", "admin:donixbalance")],
     [btn("🛠 Настройки", "admin:settings"), btn("📋 Логи", "admin:logs")],
     [btn("🏠 Главное меню", "menu:home")],
@@ -1452,6 +1652,71 @@ async function handleAdminCallback(env, db, cq, a, b, lang) {
       await sendMessage(env, topup.userId, `❌ Заявка на пополнение отклонена.`);
       await editMessage(env, chatId, messageId, `❌ Отклонено: заявка ${topupId}`, null);
     }
+  } else if (a === "orderpayok") {
+    const orderId = b;
+    const order = await getOrder(db, orderId);
+    if (!order || order.status !== "pending_payment") {
+      await answerCallback(env, cq.id);
+      return;
+    }
+    const first = await idempotentOnce(db, "orderpayconfirm", orderId);
+    if (!first) {
+      await answerCallback(env, cq.id);
+      return;
+    }
+    order.status = "paid";
+    order.paymentMethod = "terminal";
+    await saveOrder(db, order);
+    await applyReferralCommission(db, order.userId, order.total);
+
+    const buyer = await getUser(db, order.userId);
+    const buyerLang = buyer.lang || "ru";
+    await sendMessage(
+      env,
+      order.userId,
+      `${t(buyerLang, "order_created", order.orderNumber)}\n${t(buyerLang, "processing")}`,
+      backHomeKeyboard(buyerLang)
+    );
+    await editMessage(env, chatId, messageId, `✅ Оплата по заказу ${order.orderNumber} подтверждена.`, null);
+    await processDonixOrder(env, db, order, buyerLang, order.userId);
+  } else if (a === "referral") {
+    const percent = await db.get(kvKeyConfig("referral_percent"));
+    const textTpl = await db.get(kvKeyConfig("referral_text"));
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      `🤝 Реферальная программа\nТекущий процент по умолчанию: ${percent || DEFAULT_REFERRAL_PERCENT}%\nТекст: ${
+        textTpl || "(стандартный)"
+      }`,
+      ikb([
+        [btn("✏️ Изменить процент", "admin:refpercent")],
+        [btn("✏️ Изменить текст", "admin:reftext")],
+        [btn("👤 Процент для юзера", "admin:refcustom")],
+        [btn("⬅️", "admin:home")],
+      ])
+    );
+  } else if (a === "refpercent") {
+    await setState(db, userId, { step: "admin_referral_percent", data: {} });
+    await editMessage(env, chatId, messageId, "Отправьте новый процент по умолчанию, например: 0.5", ikb([[btn("⬅️", "admin:referral")]]));
+  } else if (a === "reftext") {
+    await setState(db, userId, { step: "admin_referral_text", data: {} });
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "Отправьте новый текст программы. Используйте {percent} — он подставится автоматически.",
+      ikb([[btn("⬅️", "admin:referral")]])
+    );
+  } else if (a === "refcustom") {
+    await setState(db, userId, { step: "admin_referral_custom", data: {} });
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "Отправьте: username;процент\nПример: nurt1lek_ff;1.5",
+      ikb([[btn("⬅️", "admin:referral")]])
+    );
   }
   return answerCallback(env, cq.id);
 }
@@ -1511,6 +1776,39 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
     } else {
       await sendMessage(env, chatId, "Неизвестная команда каталога.");
     }
+    return;
+  }
+
+  if (state.step === "admin_referral_percent") {
+    const value = parseFloat(text.replace(",", "."));
+    if (!Number.isFinite(value) || value < 0) {
+      await sendMessage(env, chatId, "Неверное число. Пример: 0.5");
+      return;
+    }
+    await db.put(kvKeyConfig("referral_percent"), String(value));
+    await clearState(db, userId);
+    await sendMessage(env, chatId, `✅ Процент по умолчанию: ${value}%`, adminMainKeyboard());
+    return;
+  }
+
+  if (state.step === "admin_referral_text") {
+    await db.put(kvKeyConfig("referral_text"), text);
+    await clearState(db, userId);
+    await sendMessage(env, chatId, "✅ Текст программы обновлён.", adminMainKeyboard());
+    return;
+  }
+
+  if (state.step === "admin_referral_custom") {
+    const parts = text.split(";").map((p) => p.trim());
+    const uname = (parts[0] || "").replace(/^@/, "");
+    const value = parseFloat((parts[1] || "").replace(",", "."));
+    if (!uname || !Number.isFinite(value) || value < 0) {
+      await sendMessage(env, chatId, "Неверный формат. Пример: nurt1lek_ff;1.5");
+      return;
+    }
+    await db.put(kvKeyReferralOverride(uname), String(value));
+    await clearState(db, userId);
+    await sendMessage(env, chatId, `✅ Для @${uname} установлен процент: ${value}%`, adminMainKeyboard());
     return;
   }
 
@@ -1633,6 +1931,30 @@ async function routePaymentWebhook(env, db, request) {
     return new Response("ok", { status: 200 });
   }
 
+  // paymentId may refer to either a direct order payment or a wallet top-up.
+  const order = await getOrder(db, paymentId);
+  if (order) {
+    if (order.status !== "pending_payment") {
+      return new Response("ok", { status: 200 }); // already processed
+    }
+    order.status = "paid";
+    order.paymentMethod = "bank";
+    order.transactionId = transactionId;
+    await saveOrder(db, order);
+    await applyReferralCommission(db, order.userId, order.total);
+
+    const buyer = await getUser(db, order.userId);
+    const buyerLang = buyer.lang || "ru";
+    await sendMessage(
+      env,
+      order.userId,
+      `${t(buyerLang, "order_created", order.orderNumber)}\n${t(buyerLang, "processing")}`,
+      backHomeKeyboard(buyerLang)
+    );
+    await processDonixOrder(env, db, order, buyerLang, order.userId);
+    return new Response("ok", { status: 200 });
+  }
+
   const topup = await getJSON(db, `topup:${paymentId}`);
   if (!topup) {
     console.log("Finik webhook: unknown paymentId", paymentId);
@@ -1646,6 +1968,7 @@ async function routePaymentWebhook(env, db, request) {
   topup.transactionId = transactionId;
   await putJSON(db, `topup:${paymentId}`, topup);
 
+  // Wallet top-ups never earn referral commission — only actual purchases do.
   await walletTopUpCredit(db, topup.userId, topup.amount, `finik:${transactionId}`);
 
   const user = await getUser(db, topup.userId);
