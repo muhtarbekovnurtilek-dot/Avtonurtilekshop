@@ -2,3 +2,10 @@ name = "nurtilek-shop"
 main = "worker.js"
 compatibility_date = "2026-09-19"
 compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ADMIN_ID = "8842948200"
+ADMIN_USERNAME = "nurt1lek_ff"
+FINIK_ACCOUNT_ID = "7186a748-66b1-454e-b64c-f4eb4ef1504e"
+FINIK_ENV = "beta"
+APP_BASE_URL = "https://nurtilek-shop.muhtarbekovnurtilek.workers.dev"
