@@ -1,10 +1,121 @@
 /**
  * Nurtilek Shop — Telegram bot on Cloudflare Workers
  * KV binding: DB
- * Vars: BOT_TOKEN, DONIX_API_KEY, DONIX_WEBHOOK_SECRET, ADMIN_ID
+ * Vars/secrets: BOT_TOKEN, DONIX_API_KEY, DONIX_WEBHOOK_SECRET, ADMIN_ID,
+ *   FINIK_API_KEY, FINIK_PRIVATE_KEY, FINIK_PUBLIC_KEY, FINIK_ACCOUNT_ID,
+ *   FINIK_ENV ("beta" or "prod"), APP_BASE_URL
  */
 
+import { Signer } from "@mancho.devs/authorizer";
+
 const DONIX_BASE = "https://back.donix.org/api/partner/v1";
+
+/* ================= FINIK PAYMENTS ================= */
+
+function finikBaseUrl(env) {
+  return env.FINIK_ENV === "prod"
+    ? "https://api.acquiring.averspay.kg"
+    : "https://beta.api.acquiring.averspay.kg";
+}
+
+/**
+ * Creates a Finik QR payment and returns the hosted payment page URL.
+ * amount: number in KGS (сом). paymentId: unique id, <= 36 chars (a UUID works).
+ */
+async function createFinikPayment(env, { amount, paymentId, redirectUrl, description, lang }) {
+  const baseUrl = finikBaseUrl(env);
+  const path = "/v1/payment";
+  const host = new URL(baseUrl).host;
+  const timestamp = Date.now().toString();
+
+  const body = {
+    Amount: amount,
+    CardType: "FINIK_QR",
+    PaymentId: paymentId,
+    RedirectUrl: redirectUrl,
+    Data: {
+      accountId: env.FINIK_ACCOUNT_ID,
+      name_en: "Nurtilek Shop",
+      webhookUrl: `${env.APP_BASE_URL}/payment-webhook`,
+      description: description || `Nurtilek Shop payment ${paymentId}`,
+      Lang: lang === "kg" ? "ky" : "ru",
+    },
+  };
+
+  const requestData = {
+    httpMethod: "POST",
+    path,
+    headers: {
+      Host: host,
+      "x-api-key": env.FINIK_API_KEY,
+      "x-api-timestamp": timestamp,
+    },
+    queryStringParameters: undefined,
+    body,
+  };
+
+  const signature = await new Signer(requestData).sign(env.FINIK_PRIVATE_KEY);
+
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.FINIK_API_KEY,
+      "x-api-timestamp": timestamp,
+      signature,
+    },
+    body: JSON.stringify(body),
+    redirect: "manual",
+  });
+
+  if (res.status === 302) {
+    const paymentUrl = res.headers.get("location");
+    return { ok: true, paymentUrl };
+  }
+
+  let errorData = null;
+  try {
+    errorData = await res.json();
+  } catch {
+    // ignore parse failure
+  }
+  console.log("Finik create payment error", res.status, JSON.stringify(errorData));
+  return { ok: false, status: res.status, error: errorData };
+}
+
+/**
+ * Verifies the signature of an incoming Finik webhook request.
+ * rawBody: the raw request body text (already read once).
+ */
+async function verifyFinikWebhookSignature(env, request, rawBody, url) {
+  const signature = request.headers.get("signature");
+  if (!signature) return false;
+
+  let body;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return false;
+  }
+
+  const requestData = {
+    httpMethod: "POST",
+    path: url.pathname,
+    headers: {
+      Host: request.headers.get("host") || new URL(env.APP_BASE_URL).host,
+      "x-api-timestamp": request.headers.get("x-api-timestamp") || "",
+    },
+    queryStringParameters: null,
+    body,
+  };
+
+  try {
+    return await new Signer(requestData).verify(env.FINIK_PUBLIC_KEY, signature);
+  } catch (e) {
+    console.log("Finik signature verify error", String(e));
+    return false;
+  }
+}
 
 /* ================= TRANSLATIONS ================= */
 
@@ -1222,13 +1333,31 @@ async function handleMessage(env, db, msg) {
       createdAt: new Date().toISOString(),
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, t(lang, "wallet_topup_created"), backHomeKeyboard(lang));
-    await sendMessage(
-      env,
-      env.ADMIN_ID,
-      `💰 Новая заявка на пополнение\nUser: ${userId} (@${user.username || "-"})\nСумма: ${amount} сом\nID: ${topupId}`,
-      ikb([[btn("✅ Подтвердить", `admin:topupok:${topupId}`), btn("❌ Отклонить", `admin:topupno:${topupId}`)]])
-    );
+
+    const botInfo = await tgCall(env, "getMe", {});
+    const redirectUrl = botInfo.ok && botInfo.result.username
+      ? `https://t.me/${botInfo.result.username}`
+      : env.APP_BASE_URL;
+
+    const payment = await createFinikPayment(env, {
+      amount,
+      paymentId: topupId,
+      redirectUrl,
+      description: `Nurtilek Shop top-up ${topupId}`,
+      lang,
+    });
+
+    if (!payment.ok) {
+      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+      return;
+    }
+
+    await sendMessage(env, chatId, `${amount} ${t(lang, "kg_som")}`, {
+      inline_keyboard: [
+        [{ text: "💳 Оплатить", url: payment.paymentUrl }],
+        [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
+      ],
+    });
     return;
   }
 
@@ -1473,43 +1602,60 @@ async function routeDonixWebhook(env, db, request) {
 }
 
 async function routePaymentWebhook(env, db, request) {
-  // Adapter placeholder: wire this to your real payment gateway's verified callback.
-  // It MUST verify the gateway's own signature before trusting anything below.
-  // Until a real gateway is connected, this endpoint only accepts pre-approved
-  // manual confirmations created via the admin panel (see admin:topupok / topupno),
-  // so no payment is ever marked successful without an explicit, auditable confirmation.
+  const url = new URL(request.url);
+  const rawBody = await request.text();
+
+  const isValid = await verifyFinikWebhookSignature(env, request, rawBody, url);
+  if (!isValid) {
+    return new Response("invalid signature", { status: 401 });
+  }
+
   let payload;
   try {
-    payload = await request.json();
+    payload = JSON.parse(rawBody);
   } catch {
     return new Response("bad request", { status: 400 });
   }
 
-  const { orderInternalId, providerRef, verifiedSignature } = payload;
-  if (!verifiedSignature) {
-    return new Response("signature required", { status: 401 });
+  // Finik only sends this webhook on a SUCCESSFUL payment (see docs).
+  const transactionId = payload.transactionId || payload.id;
+  const status = (payload.status || "").toLowerCase();
+  const paymentId = payload.fields && payload.fields.paymentId;
+
+  if (!transactionId || !paymentId) {
+    return new Response("ok", { status: 200 }); // nothing to do, ack anyway
   }
 
-  const order = await getOrder(db, orderInternalId);
-  if (!order) return new Response("order not found", { status: 404 });
+  const first = await idempotentOnce(db, "finikwebhook", transactionId);
+  if (!first) return new Response("ok", { status: 200 }); // already processed (retry-safe)
 
-  const first = await idempotentOnce(db, "paymentwebhook", orderInternalId);
-  if (!first) return new Response("ok", { status: 200 }); // already processed
-
-  if (order.status !== "pending_payment") {
+  if (status !== "success" && status !== "succeeded") {
     return new Response("ok", { status: 200 });
   }
 
-  order.status = "paid";
-  order.providerRef = providerRef || null;
-  await saveOrder(db, order);
-  await walletCommitSpend(db, order.userId, order.total, order.orderNumber);
-  if (order.promoCode) await consumePromo(db, order.promoCode, order.userId);
+  const topup = await getJSON(db, `topup:${paymentId}`);
+  if (!topup) {
+    console.log("Finik webhook: unknown paymentId", paymentId);
+    return new Response("ok", { status: 200 });
+  }
+  if (topup.status === "confirmed") {
+    return new Response("ok", { status: 200 }); // already credited
+  }
 
-  const user = await getUser(db, order.userId);
+  topup.status = "confirmed";
+  topup.transactionId = transactionId;
+  await putJSON(db, `topup:${paymentId}`, topup);
+
+  await walletTopUpCredit(db, topup.userId, topup.amount, `finik:${transactionId}`);
+
+  const user = await getUser(db, topup.userId);
   const lang = user.lang || "ru";
-  await sendMessage(env, order.userId, `${t(lang, "order_created", order.orderNumber)}\n${t(lang, "processing")}`);
-  await processDonixOrder(env, db, order, lang, order.userId);
+  await sendMessage(
+    env,
+    topup.userId,
+    `✅ ${t(lang, "wallet_topup")}: +${topup.amount} ${t(lang, "kg_som")}`,
+    backHomeKeyboard(lang)
+  );
 
   return new Response("ok", { status: 200 });
 }
