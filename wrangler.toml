@@ -9,3 +9,13 @@ ADMIN_USERNAME = "nurt1lek_ff"
 FINIK_ACCOUNT_ID = "7186a748-66b1-454e-b64c-f4eb4ef1504e"
 FINIK_ENV = "prod"
 APP_BASE_URL = "https://nurtilek-shop.muhtarbekovnurtilek.workers.dev"
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 1
+persist = true
