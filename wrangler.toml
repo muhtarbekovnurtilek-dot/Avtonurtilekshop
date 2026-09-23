@@ -19,3 +19,7 @@ persist = true
 enabled = false
 head_sampling_rate = 1
 persist = true
+
+[[kv_namespaces]]
+binding = "DB"
+id = "aa5a909caf2d463da94b0fe9d6d9d72d"
