@@ -179,7 +179,64 @@ const T = {
     promo_applied: (d) => `Промокод применён. Скидка: ${d} сом`,
     promo_invalid: "❌ Промокод недействителен.",
     promo_admin_create_hint:
-      "Отправьте промокод в формате:\nCODE;TYPE;VALUE;USES;DAYS;MINSUM\nTYPE = percent или fixed\nПример: SALE10;percent;10;100;30;500",
+      "🎟 <b>Создание промокода</b>\n\n" +
+      "Отправьте одной строкой, поля через « ; » (точка с запятой):\n" +
+      "<code>КОД;ТИП;ЗНАЧЕНИЕ;КОЛ-ВО;ДНИ;МИНСУММА</code>\n\n" +
+      "1️⃣ <b>КОД</b> — сам промокод, например SALE10 (регистр неважен)\n" +
+      "2️⃣ <b>ТИП</b> — <code>percent</code> (скидка в %) или <code>fixed</code> (скидка в сомах)\n" +
+      "3️⃣ <b>ЗНАЧЕНИЕ</b> — размер скидки: для percent — число от 1 до 100 (%), для fixed — сумма в сомах\n" +
+      "4️⃣ <b>КОЛ-ВО</b> — сколько раз всего можно использовать код. Оставьте пустым или напишите 0 — будет «навсегда» (без ограничения по количеству)\n" +
+      "5️⃣ <b>ДНИ</b> — через сколько дней код сгорит. Оставьте пустым или напишите 0 — код будет действовать без срока (навсегда)\n" +
+      "6️⃣ <b>МИНСУММА</b> — минимальная сумма заказа для применения кода (необязательно, по умолчанию 0)\n\n" +
+      "По умолчанию каждый код можно использовать только один раз на один аккаунт (один Telegram-аккаунт = один раз), даже если общее количество использований не исчерпано.\n\n" +
+      "Примеры:\n" +
+      "• <code>SALE10;percent;10;100;30;500</code> — скидка 10%, максимум 100 использований, действует 30 дней, от 500 сом\n" +
+      "• <code>VIP;fixed;50;;;</code> — скидка 50 сом, без ограничения по количеству использований и без срока действия (но каждый аккаунт применит только 1 раз)",
+    promo_created_summary: (p) => {
+      const uses = p.usesLeft >= 999999 ? "без ограничений" : `${p.usesLeft}`;
+      const expires = p.expiresAt ? new Date(p.expiresAt).toLocaleDateString("ru-RU") : "не сгорает (навсегда)";
+      const valueLabel = p.type === "percent" ? `${p.value}%` : `${p.value} сом`;
+      return (
+        `✅ <b>Промокод создан: ${p.code}</b>\n` +
+        `Скидка: ${valueLabel}\n` +
+        `Осталось использований: ${uses}\n` +
+        `Срок действия: ${expires}\n` +
+        `Мин. сумма заказа: ${p.minSum} сом\n` +
+        `Один раз на аккаунт: ${p.onePerUser ? "да" : "нет"}`
+      );
+    },
+    promo_applied_detail: (p) => {
+      const valueLabel = p.type === "percent" ? `${p.value}% от суммы заказа` : `${p.value} сом`;
+      const expires = p.expiresAt ? new Date(p.expiresAt).toLocaleDateString("ru-RU") : "бессрочно";
+      return (
+        `✅ <b>Промокод «${p.code}» применён</b>\n` +
+        `Скидка: ${valueLabel}${p.minSum > 0 ? `\nМинимальная сумма заказа: ${p.minSum} сом` : ""}\n` +
+        `Действует до: ${expires}\n` +
+        `Скидка применится автоматически при оформлении заказа.`
+      );
+    },
+    history_empty: "У вас пока нет операций по кошельку.",
+    history_title: "📜 История операций:",
+    history_topup: (n, note) => `➕ Пополнение баланса: +${n} ${T.ru.kg_som}${note ? ` (${note})` : ""}`,
+    history_purchase: (n, name) => `🛒 Оплата заказа${name ? ` «${name}»` : ""}: −${n} ${T.ru.kg_som}`,
+    history_refund: (n, reason) => `↩️ Возврат средств: +${n} ${T.ru.kg_som}${reason ? ` (${reason})` : ""}`,
+    history_referral: (n, from) => `🤝 Бонус от реферала: +${n} ${T.ru.kg_som}`,
+    history_admin_credit: (n) => `🛠 Начислено администратором: +${n} ${T.ru.kg_som}`,
+    history_admin_debit: (n) => `🛠 Списано администратором: −${n} ${T.ru.kg_som}`,
+    referral_purchase_notify: (n, percent) =>
+      `🎉 Ваш реферал совершил покупку!\nВам начислено: +${n} ${T.ru.kg_som} (${percent}% от суммы покупки).`,
+    btn_manage_balance: "💰 Баланс пользователя",
+    admin_ask_user_id: "Отправьте Telegram ID пользователя (число), например: 123456789",
+    admin_user_not_found: "❌ Пользователь с таким ID не найден (он ещё не запускал бота).",
+    admin_ask_balance_amount: (u) =>
+      `Пользователь: ${u.id} @${u.username || "—"}\nТекущий баланс: ${u.balance} сом\n\n` +
+      `Отправьте сумму:\n• число со знаком «+», чтобы начислить (например +100)\n• число со знаком «−» или «-», чтобы списать (например -100)`,
+    admin_balance_updated: (u, delta) =>
+      `✅ Готово. ${delta >= 0 ? "Начислено" : "Списано"}: ${Math.abs(delta)} сом.\nНовый баланс пользователя ${u.id}: ${u.balance} сом.`,
+    admin_balance_user_notify_credit: (n, balance) =>
+      `🛠 Администратор начислил вам ${n} сом.\nВаш новый баланс: ${balance} сом.`,
+    admin_balance_user_notify_debit: (n, balance) =>
+      `🛠 Администратор списал с вашего баланса ${n} сом.\nВаш новый баланс: ${balance} сом.`,
     lang_choose: "Выберите язык:",
     lang_set: "Язык изменён на Русский",
     admin_panel: "⚙️ Админ-панель",
@@ -472,7 +529,7 @@ async function getReferralText(db, lang) {
  * Credits the referrer of `buyerUserId` with a percentage of a completed purchase.
  * Only triggered on actual product purchases (never on wallet top-ups).
  */
-async function applyReferralCommission(db, buyerUserId, saleAmount) {
+async function applyReferralCommission(env, db, buyerUserId, saleAmount) {
   const buyer = await getUser(db, buyerUserId);
   if (!buyer.referredBy) return;
   const referrer = await getUser(db, buyer.referredBy);
@@ -483,6 +540,15 @@ async function applyReferralCommission(db, buyerUserId, saleAmount) {
   referrer.referralEarnings = (referrer.referralEarnings || 0) + commission;
   await saveUser(db, referrer);
   await addWalletHistory(db, referrer.id, { type: "referral", amount: commission, from: buyerUserId });
+  // Notify the referrer immediately in chat, as requested — this fires right when
+  // their friend's purchase is finalized, regardless of how the friend paid.
+  const referrerLang = referrer.lang || "ru";
+  await sendMessage(
+    env,
+    referrer.id,
+    t(referrerLang, "referral_purchase_notify", commission, percent),
+    backHomeKeyboard(referrerLang)
+  );
 }
 
 async function getJSON(db, key, fallback = null) {
@@ -664,6 +730,26 @@ async function addWalletHistory(db, userId, entry) {
   await putJSON(db, key, list);
 }
 
+/* Human-readable Russian/Kyrgyz line for one wallet-history entry (topup, purchase, refund, referral, admin adjustment). */
+function walletHistoryLine(lang, h) {
+  switch (h.type) {
+    case "topup":
+      return t(lang, "history_topup", h.amount, h.note && h.note.startsWith("finik:") ? null : h.note);
+    case "purchase":
+      return t(lang, "history_purchase", h.amount, h.itemName);
+    case "refund":
+      return t(lang, "history_refund", h.amount, h.reason);
+    case "referral":
+      return t(lang, "history_referral", h.amount, h.from);
+    case "admin_credit":
+      return t(lang, "history_admin_credit", h.amount);
+    case "admin_debit":
+      return t(lang, "history_admin_debit", h.amount);
+    default:
+      return `${h.type} — ${h.amount} ${t(lang, "kg_som")}`;
+  }
+}
+
 async function walletReserve(db, user, amount) {
   if (user.balance < amount) return false;
   user.balance -= amount;
@@ -678,11 +764,11 @@ async function walletRelease(db, userId, amount, reason) {
   await addWalletHistory(db, userId, { type: "refund", amount, reason });
 }
 
-async function walletCommitSpend(db, userId, amount, orderNumber) {
+async function walletCommitSpend(db, userId, amount, orderNumber, itemName) {
   const user = await getUser(db, userId);
   user.spent += amount;
   await saveUser(db, user);
-  await addWalletHistory(db, userId, { type: "purchase", amount, orderNumber });
+  await addWalletHistory(db, userId, { type: "purchase", amount, orderNumber, itemName });
 }
 
 async function walletTopUpCredit(db, userId, amount, note) {
@@ -692,19 +778,43 @@ async function walletTopUpCredit(db, userId, amount, note) {
   await addWalletHistory(db, userId, { type: "topup", amount, note });
 }
 
+/* Admin manually credits or debits a user's balance from the "Баланс пользователя" settings screen.
+   delta > 0 = начислить (credit), delta < 0 = списать (debit). Returns the updated user. */
+async function walletAdminAdjust(env, db, userId, delta) {
+  const user = await getUser(db, userId);
+  user.balance += delta;
+  await saveUser(db, user);
+  await addWalletHistory(db, userId, { type: delta >= 0 ? "admin_credit" : "admin_debit", amount: Math.abs(delta) });
+  const lang = user.lang || "ru";
+  await sendMessage(
+    env,
+    userId,
+    delta >= 0
+      ? t(lang, "admin_balance_user_notify_credit", delta, user.balance)
+      : t(lang, "admin_balance_user_notify_debit", Math.abs(delta), user.balance),
+    backHomeKeyboard(lang)
+  );
+  return user;
+}
+
 /* ================= PROMO CODES ================= */
+
+const UNLIMITED_USES = 999999;
 
 async function createPromo(db, spec) {
   // spec: {code, type: 'percent'|'fixed', value, uses, days, minSum, firstPurchaseOnly, onePerUser}
+  // uses/days empty or 0 => unlimited / never expires ("forever"), per admin request.
+  const usesNum = Number(spec.uses);
+  const daysNum = Number(spec.days);
   const promo = {
     code: spec.code.toUpperCase(),
     type: spec.type,
     value: Number(spec.value),
-    usesLeft: Number(spec.uses) || 0,
+    usesLeft: Number.isFinite(usesNum) && usesNum > 0 ? usesNum : UNLIMITED_USES,
     minSum: Number(spec.minSum) || 0,
     firstPurchaseOnly: !!spec.firstPurchaseOnly,
     onePerUser: spec.onePerUser !== false,
-    expiresAt: spec.days ? new Date(Date.now() + Number(spec.days) * 86400000).toISOString() : null,
+    expiresAt: Number.isFinite(daysNum) && daysNum > 0 ? new Date(Date.now() + daysNum * 86400000).toISOString() : null,
     createdAt: new Date().toISOString(),
     active: true,
   };
@@ -746,10 +856,10 @@ async function consumePromo(db, code, userId) {
    marks the "spent" total, consumes the promo code, and pays referral commission.
    Kept in one place so promo codes and referral bonuses can never be skipped for
    any particular payment method. */
-async function finalizeOrderPaid(db, order) {
-  await walletCommitSpend(db, order.userId, order.total, order.orderNumber);
+async function finalizeOrderPaid(env, db, order) {
+  await walletCommitSpend(db, order.userId, order.total, order.orderNumber, order.itemName);
   if (order.promoCode) await consumePromo(db, order.promoCode, order.userId);
-  await applyReferralCommission(db, order.userId, order.total);
+  await applyReferralCommission(env, db, order.userId, order.total);
 }
 
 /* ================= ORDERS ================= */
@@ -1150,7 +1260,7 @@ async function handleCallbackQuery(env, db, cq) {
       }
       order.status = "paid";
       await saveOrder(db, order);
-      await finalizeOrderPaid(db, order);
+      await finalizeOrderPaid(env, db, order);
 
       await editMessage(
         env,
@@ -1254,13 +1364,12 @@ async function handleCallbackQuery(env, db, cq) {
         const key = await walletHistoryKey(userId);
         const list = (await getJSON(db, key, [])) || [];
         if (list.length === 0) {
-          await editMessage(env, chatId, messageId, t(lang, "orders_empty"), walletKeyboard(lang));
+          await editMessage(env, chatId, messageId, t(lang, "history_empty"), walletKeyboard(lang));
         } else {
-          const lines = list
-            .slice(0, 15)
-            .map((h) => `${h.at.slice(0, 10)} — ${h.type} — ${h.amount} ${t(lang, "kg_som")}`)
-            .join("\n");
-          await editMessage(env, chatId, messageId, lines, walletKeyboard(lang));
+          const lines = [t(lang, "history_title"), ""].concat(
+            list.slice(0, 15).map((h) => `${h.at.slice(0, 10)}\n${walletHistoryLine(lang, h)}`)
+          );
+          await editMessage(env, chatId, messageId, lines.join("\n"), walletKeyboard(lang));
         }
       }
       return answerCallback(env, cq.id);
@@ -1648,7 +1757,10 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
 
   if (state.step === "await_promo_code") {
     await clearState(db, userId);
-    const check = await validatePromo(db, text, userId, 0);
+    // A large sentinel sum here: this is just checking the code itself is valid
+    // (exists, active, not expired, not exhausted, not already used by this user).
+    // The real minimum-sum check happens against the real order total at checkout.
+    const check = await validatePromo(db, text, userId, Number.MAX_SAFE_INTEGER);
     if (!check.ok) {
       await sendMessage(env, chatId, t(lang, "promo_invalid"), backHomeKeyboard(lang));
       return;
@@ -1656,7 +1768,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     // Stored separately from the step-machine state so it isn't lost when the
     // user goes on to browse categories/products before checking out.
     await db.put(kvKeyActivePromo(userId), text.toUpperCase());
-    await sendMessage(env, chatId, `✅ ${text.toUpperCase()}`, backHomeKeyboard(lang));
+    await sendMessage(env, chatId, t(lang, "promo_applied_detail", check.promo), backHomeKeyboard(lang));
     return;
   }
 
@@ -1694,9 +1806,20 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       return;
     }
 
+    // Balance is credited automatically by the Finik webhook right after a successful
+    // payment. This button is a manual fallback in case that webhook is ever delayed
+    // or missed — it DMs the admin with the top-up ID so it can be credited by hand
+    // from "Настройки → Баланс пользователя".
+    const supportText = `Оплата не пополнилась. topupId: ${topupId}, userId: ${userId}, сумма: ${amount} сом`;
     await sendMessage(env, chatId, `${amount} ${t(lang, "kg_som")}`, {
       inline_keyboard: [
         [{ text: "💳 Оплатить", url: payment.paymentUrl }],
+        [
+          {
+            text: "❓ Оплатил(а), но баланс не пополнился",
+            url: `https://t.me/${env.ADMIN_USERNAME}?text=${encodeURIComponent(supportText)}`,
+          },
+        ],
         [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
       ],
     });
@@ -1797,7 +1920,35 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     await editMessage(env, chatId, messageId, text, ikb([[btn("⬅️", "admin:home")]]));
   } else if (a === "promos") {
     await setState(db, userId, { step: "admin_create_promo", data: {} });
-    await editMessage(env, chatId, messageId, t(lang, "promo_admin_create_hint"), ikb([[btn("⬅️", "admin:home")]]));
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      t(lang, "promo_admin_create_hint"),
+      ikb([[btn("📋 Список промокодов", "admin:promolist")], [btn("⬅️", "admin:home")]])
+    );
+  } else if (a === "promolist") {
+    await clearState(db, userId);
+    const keys = await db.list({ prefix: "promo:" });
+    const lines = ["🎟 <b>Активные промокоды:</b>", ""];
+    let count = 0;
+    for (const k of keys.keys) {
+      if (k.name.startsWith("promouse:")) continue; // skip per-user usage markers
+      const p = await getJSON(db, k.name);
+      if (!p) continue;
+      count++;
+      const valueLabel = p.type === "percent" ? `${p.value}%` : `${p.value} сом`;
+      const uses = p.usesLeft >= UNLIMITED_USES ? "без ограничений" : `${p.usesLeft}`;
+      const expires = p.expiresAt ? new Date(p.expiresAt).toLocaleDateString("ru-RU") : "навсегда";
+      lines.push(
+        `<b>${p.code}</b> — ${valueLabel}${p.active ? "" : " (выключен)"}\n` +
+          `Осталось использований: ${uses} | Срок: ${expires} | Мин. сумма: ${p.minSum} сом | 1 на аккаунт: ${
+            p.onePerUser ? "да" : "нет"
+          }`
+      );
+    }
+    if (count === 0) lines.push("Пока нет ни одного промокода.");
+    await editMessage(env, chatId, messageId, lines.join("\n\n"), ikb([[btn("⬅️", "admin:promos")]]));
   } else if (a === "catalog") {
     await clearState(db, userId);
     await editMessage(
@@ -1880,7 +2031,19 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     }
     if (users.length === 0) lines.push("Пока нет пользователей.");
     await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:home")]]));
-  } else if (a === "settings" || a === "logs") {
+  } else if (a === "settings") {
+    await clearState(db, userId);
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "🛠 Настройки\n\nЗдесь можно вручную начислить или списать деньги с баланса любого пользователя.",
+      ikb([[btn(t(lang, "btn_manage_balance"), "admin:balancefind")], [btn("⬅️", "admin:home")]])
+    );
+  } else if (a === "balancefind") {
+    await setState(db, userId, { step: "admin_balance_find_user", data: {} });
+    await editMessage(env, chatId, messageId, t(lang, "admin_ask_user_id"), ikb([[btn("⬅️", "admin:settings")]]));
+  } else if (a === "logs") {
     await editMessage(
       env,
       chatId,
@@ -1929,7 +2092,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     order.status = "paid";
     order.paymentMethod = "terminal";
     await saveOrder(db, order);
-    await finalizeOrderPaid(db, order);
+    await finalizeOrderPaid(env, db, order);
 
     const buyer = await getUser(db, order.userId);
     const buyerLang = buyer.lang || "ru";
@@ -1991,24 +2154,54 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
   if (state.step === "admin_create_promo") {
     const parts = text.split(";").map((p) => p.trim());
     if (parts.length < 3) {
-      await sendMessage(env, chatId, "Неверный формат. " + t(lang, "promo_admin_create_hint"));
+      await sendMessage(env, chatId, "❌ Неверный формат.\n\n" + t(lang, "promo_admin_create_hint"));
       return;
     }
     const [code, type, value, uses, days, minSum] = parts;
-    if (!code || !["percent", "fixed"].includes(type) || !value) {
-      await sendMessage(env, chatId, "Неверный формат. " + t(lang, "promo_admin_create_hint"));
+    if (!code || !["percent", "fixed"].includes((type || "").toLowerCase()) || !value || !Number.isFinite(Number(value))) {
+      await sendMessage(env, chatId, "❌ Неверный формат.\n\n" + t(lang, "promo_admin_create_hint"));
       return;
     }
     const promo = await createPromo(db, {
       code,
-      type,
+      type: type.toLowerCase(),
       value,
-      uses: uses || 100,
-      days: days || 30,
-      minSum: minSum || 0,
+      uses,
+      days,
+      minSum,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, `✅ Промокод создан: ${promo.code}`, adminMainKeyboard());
+    await sendMessage(env, chatId, t(lang, "promo_created_summary", promo), adminMainKeyboard());
+    return;
+  }
+
+  if (state.step === "admin_balance_find_user") {
+    const targetId = parseInt(text, 10);
+    if (!Number.isFinite(targetId)) {
+      await sendMessage(env, chatId, t(lang, "invalid_input"));
+      return;
+    }
+    const existing = await getJSON(db, kvKeyUser(targetId));
+    if (!existing) {
+      await sendMessage(env, chatId, t(lang, "admin_user_not_found"), ikb([[btn("⬅️", "admin:settings")]]));
+      return;
+    }
+    await setState(db, userId, { step: "admin_balance_amount", data: { targetId } });
+    await sendMessage(env, chatId, t(lang, "admin_ask_balance_amount", existing), ikb([[btn("⬅️", "admin:settings")]]));
+    return;
+  }
+
+  if (state.step === "admin_balance_amount") {
+    const { targetId } = state.data;
+    const cleaned = text.replace(/\s/g, "").replace(",", ".").replace(/^\+/, "");
+    const delta = Number(cleaned);
+    if (!Number.isFinite(delta) || delta === 0) {
+      await sendMessage(env, chatId, t(lang, "invalid_input"));
+      return;
+    }
+    const updated = await walletAdminAdjust(env, db, targetId, delta);
+    await clearState(db, userId);
+    await sendMessage(env, chatId, t(lang, "admin_balance_updated", updated, delta), adminMainKeyboard());
     return;
   }
 
@@ -2208,7 +2401,7 @@ async function routePaymentWebhook(env, db, request) {
     order.paymentMethod = "bank";
     order.transactionId = transactionId;
     await saveOrder(db, order);
-    await finalizeOrderPaid(db, order);
+    await finalizeOrderPaid(env, db, order);
 
     const buyer = await getUser(db, order.userId);
     const buyerLang = buyer.lang || "ru";
