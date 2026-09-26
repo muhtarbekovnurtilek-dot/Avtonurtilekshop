@@ -147,6 +147,12 @@ const T = {
     choose_qty: "Выберите количество:",
     qty_line: (n) => `Количество: ${n} (макс. 10)`,
     qty_total_line: (s) => `Сумма: ${s} сом`,
+    cart_title: "🛒 Товары",
+    cart_empty: "Товары не выбраны",
+    btn_cart_next: "✅ Далее",
+    btn_cart_reset: (s) => `🔄 Сброс • ${s} сом`,
+    cart_max_reached: "❌ Максимум 10 шт. этого товара.",
+    cart_choose_at_least_one: "❌ Выберите хотя бы один товар.",
     prices_title: "💰 Цены:",
     enter_uid_ff: "Введите UID Free Fire:",
     enter_uid_pubg: "Введите PUBG ID:",
@@ -179,64 +185,7 @@ const T = {
     promo_applied: (d) => `Промокод применён. Скидка: ${d} сом`,
     promo_invalid: "❌ Промокод недействителен.",
     promo_admin_create_hint:
-      "🎟 <b>Создание промокода</b>\n\n" +
-      "Отправьте одной строкой, поля через « ; » (точка с запятой):\n" +
-      "<code>КОД;ТИП;ЗНАЧЕНИЕ;КОЛ-ВО;ДНИ;МИНСУММА</code>\n\n" +
-      "1️⃣ <b>КОД</b> — сам промокод, например SALE10 (регистр неважен)\n" +
-      "2️⃣ <b>ТИП</b> — <code>percent</code> (скидка в %) или <code>fixed</code> (скидка в сомах)\n" +
-      "3️⃣ <b>ЗНАЧЕНИЕ</b> — размер скидки: для percent — число от 1 до 100 (%), для fixed — сумма в сомах\n" +
-      "4️⃣ <b>КОЛ-ВО</b> — сколько раз всего можно использовать код. Оставьте пустым или напишите 0 — будет «навсегда» (без ограничения по количеству)\n" +
-      "5️⃣ <b>ДНИ</b> — через сколько дней код сгорит. Оставьте пустым или напишите 0 — код будет действовать без срока (навсегда)\n" +
-      "6️⃣ <b>МИНСУММА</b> — минимальная сумма заказа для применения кода (необязательно, по умолчанию 0)\n\n" +
-      "По умолчанию каждый код можно использовать только один раз на один аккаунт (один Telegram-аккаунт = один раз), даже если общее количество использований не исчерпано.\n\n" +
-      "Примеры:\n" +
-      "• <code>SALE10;percent;10;100;30;500</code> — скидка 10%, максимум 100 использований, действует 30 дней, от 500 сом\n" +
-      "• <code>VIP;fixed;50;;;</code> — скидка 50 сом, без ограничения по количеству использований и без срока действия (но каждый аккаунт применит только 1 раз)",
-    promo_created_summary: (p) => {
-      const uses = p.usesLeft >= 999999 ? "без ограничений" : `${p.usesLeft}`;
-      const expires = p.expiresAt ? new Date(p.expiresAt).toLocaleDateString("ru-RU") : "не сгорает (навсегда)";
-      const valueLabel = p.type === "percent" ? `${p.value}%` : `${p.value} сом`;
-      return (
-        `✅ <b>Промокод создан: ${p.code}</b>\n` +
-        `Скидка: ${valueLabel}\n` +
-        `Осталось использований: ${uses}\n` +
-        `Срок действия: ${expires}\n` +
-        `Мин. сумма заказа: ${p.minSum} сом\n` +
-        `Один раз на аккаунт: ${p.onePerUser ? "да" : "нет"}`
-      );
-    },
-    promo_applied_detail: (p) => {
-      const valueLabel = p.type === "percent" ? `${p.value}% от суммы заказа` : `${p.value} сом`;
-      const expires = p.expiresAt ? new Date(p.expiresAt).toLocaleDateString("ru-RU") : "бессрочно";
-      return (
-        `✅ <b>Промокод «${p.code}» применён</b>\n` +
-        `Скидка: ${valueLabel}${p.minSum > 0 ? `\nМинимальная сумма заказа: ${p.minSum} сом` : ""}\n` +
-        `Действует до: ${expires}\n` +
-        `Скидка применится автоматически при оформлении заказа.`
-      );
-    },
-    history_empty: "У вас пока нет операций по кошельку.",
-    history_title: "📜 История операций:",
-    history_topup: (n, note) => `➕ Пополнение баланса: +${n} ${T.ru.kg_som}${note ? ` (${note})` : ""}`,
-    history_purchase: (n, name) => `🛒 Оплата заказа${name ? ` «${name}»` : ""}: −${n} ${T.ru.kg_som}`,
-    history_refund: (n, reason) => `↩️ Возврат средств: +${n} ${T.ru.kg_som}${reason ? ` (${reason})` : ""}`,
-    history_referral: (n, from) => `🤝 Бонус от реферала: +${n} ${T.ru.kg_som}`,
-    history_admin_credit: (n) => `🛠 Начислено администратором: +${n} ${T.ru.kg_som}`,
-    history_admin_debit: (n) => `🛠 Списано администратором: −${n} ${T.ru.kg_som}`,
-    referral_purchase_notify: (n, percent) =>
-      `🎉 Ваш реферал совершил покупку!\nВам начислено: +${n} ${T.ru.kg_som} (${percent}% от суммы покупки).`,
-    btn_manage_balance: "💰 Баланс пользователя",
-    admin_ask_user_id: "Отправьте Telegram ID пользователя (число), например: 123456789",
-    admin_user_not_found: "❌ Пользователь с таким ID не найден (он ещё не запускал бота).",
-    admin_ask_balance_amount: (u) =>
-      `Пользователь: ${u.id} @${u.username || "—"}\nТекущий баланс: ${u.balance} сом\n\n` +
-      `Отправьте сумму:\n• число со знаком «+», чтобы начислить (например +100)\n• число со знаком «−» или «-», чтобы списать (например -100)`,
-    admin_balance_updated: (u, delta) =>
-      `✅ Готово. ${delta >= 0 ? "Начислено" : "Списано"}: ${Math.abs(delta)} сом.\nНовый баланс пользователя ${u.id}: ${u.balance} сом.`,
-    admin_balance_user_notify_credit: (n, balance) =>
-      `🛠 Администратор начислил вам ${n} сом.\nВаш новый баланс: ${balance} сом.`,
-    admin_balance_user_notify_debit: (n, balance) =>
-      `🛠 Администратор списал с вашего баланса ${n} сом.\nВаш новый баланс: ${balance} сом.`,
+      "Отправьте промокод в формате:\nCODE;TYPE;VALUE;USES;DAYS;MINSUM\nTYPE = percent или fixed\nПример: SALE10;percent;10;100;30;500",
     lang_choose: "Выберите язык:",
     lang_set: "Язык изменён на Русский",
     admin_panel: "⚙️ Админ-панель",
@@ -295,6 +244,12 @@ const T = {
     choose_qty: "Санын тандаңыз:",
     qty_line: (n) => `Саны: ${n} (макс. 10)`,
     qty_total_line: (s) => `Сумма: ${s} сом`,
+    cart_title: "🛒 Товарлар",
+    cart_empty: "Товарлар тандалган жок",
+    btn_cart_next: "✅ Кийинки",
+    btn_cart_reset: (s) => `🔄 Тазалоо • ${s} сом`,
+    cart_max_reached: "❌ Бул товардан макс. 10 даана.",
+    cart_choose_at_least_one: "❌ Жок дегенде бир товар тандаңыз.",
     prices_title: "💰 Баалар:",
     enter_uid_ff: "Free Fire UID киргизиңиз:",
     enter_uid_pubg: "PUBG ID киргизиңиз:",
@@ -501,6 +456,12 @@ function kvKeyStarsPricePerStar() {
 function kvKeyActivePromo(userId) {
   return `activepromo:${userId}`;
 }
+function kvKeyCart(userId) {
+  return `cart:${userId}`;
+}
+function kvKeyBalanceHistory(userId) {
+  return `balancehistory:${userId}`;
+}
 function kvKeyReferralOverride(username) {
   return `config:referral_percent_user:${(username || "").toLowerCase()}`;
 }
@@ -529,7 +490,7 @@ async function getReferralText(db, lang) {
  * Credits the referrer of `buyerUserId` with a percentage of a completed purchase.
  * Only triggered on actual product purchases (never on wallet top-ups).
  */
-async function applyReferralCommission(env, db, buyerUserId, saleAmount) {
+async function applyReferralCommission(db, buyerUserId, saleAmount) {
   const buyer = await getUser(db, buyerUserId);
   if (!buyer.referredBy) return;
   const referrer = await getUser(db, buyer.referredBy);
@@ -540,15 +501,6 @@ async function applyReferralCommission(env, db, buyerUserId, saleAmount) {
   referrer.referralEarnings = (referrer.referralEarnings || 0) + commission;
   await saveUser(db, referrer);
   await addWalletHistory(db, referrer.id, { type: "referral", amount: commission, from: buyerUserId });
-  // Notify the referrer immediately in chat, as requested — this fires right when
-  // their friend's purchase is finalized, regardless of how the friend paid.
-  const referrerLang = referrer.lang || "ru";
-  await sendMessage(
-    env,
-    referrer.id,
-    t(referrerLang, "referral_purchase_notify", commission, percent),
-    backHomeKeyboard(referrerLang)
-  );
 }
 
 async function getJSON(db, key, fallback = null) {
@@ -593,6 +545,28 @@ async function setState(db, id, state) {
 }
 async function clearState(db, id) {
   await db.delete(kvKeyState(id));
+}
+
+/* ================= CART (multi-item basket per category) ================= */
+/* Shape: { catKey, items: { [itemId]: qty } } — one active cart per user at a time.
+   Switching to a different category starts a fresh cart. */
+async function getCart(db, userId) {
+  return await getJSON(db, kvKeyCart(userId));
+}
+async function saveCart(db, userId, cart) {
+  await putJSON(db, kvKeyCart(userId), cart);
+}
+async function clearCart(db, userId) {
+  await db.delete(kvKeyCart(userId));
+}
+function cartTotal(cart, resolvedItems) {
+  if (!cart) return 0;
+  let sum = 0;
+  for (const item of resolvedItems) {
+    const qty = cart.items[item.id] || 0;
+    sum += item.price * qty;
+  }
+  return sum;
 }
 
 /* order number generator: plain sequential number (1, 2, 3, ...), no date —
@@ -730,26 +704,6 @@ async function addWalletHistory(db, userId, entry) {
   await putJSON(db, key, list);
 }
 
-/* Human-readable Russian/Kyrgyz line for one wallet-history entry (topup, purchase, refund, referral, admin adjustment). */
-function walletHistoryLine(lang, h) {
-  switch (h.type) {
-    case "topup":
-      return t(lang, "history_topup", h.amount, h.note && h.note.startsWith("finik:") ? null : h.note);
-    case "purchase":
-      return t(lang, "history_purchase", h.amount, h.itemName);
-    case "refund":
-      return t(lang, "history_refund", h.amount, h.reason);
-    case "referral":
-      return t(lang, "history_referral", h.amount, h.from);
-    case "admin_credit":
-      return t(lang, "history_admin_credit", h.amount);
-    case "admin_debit":
-      return t(lang, "history_admin_debit", h.amount);
-    default:
-      return `${h.type} — ${h.amount} ${t(lang, "kg_som")}`;
-  }
-}
-
 async function walletReserve(db, user, amount) {
   if (user.balance < amount) return false;
   user.balance -= amount;
@@ -764,11 +718,11 @@ async function walletRelease(db, userId, amount, reason) {
   await addWalletHistory(db, userId, { type: "refund", amount, reason });
 }
 
-async function walletCommitSpend(db, userId, amount, orderNumber, itemName) {
+async function walletCommitSpend(db, userId, amount, orderNumber) {
   const user = await getUser(db, userId);
   user.spent += amount;
   await saveUser(db, user);
-  await addWalletHistory(db, userId, { type: "purchase", amount, orderNumber, itemName });
+  await addWalletHistory(db, userId, { type: "purchase", amount, orderNumber });
 }
 
 async function walletTopUpCredit(db, userId, amount, note) {
@@ -778,43 +732,53 @@ async function walletTopUpCredit(db, userId, amount, note) {
   await addWalletHistory(db, userId, { type: "topup", amount, note });
 }
 
-/* Admin manually credits or debits a user's balance from the "Баланс пользователя" settings screen.
-   delta > 0 = начислить (credit), delta < 0 = списать (debit). Returns the updated user. */
-async function walletAdminAdjust(env, db, userId, delta) {
+/* ================= ADMIN BALANCE ADJUSTMENTS ================= */
+
+/* Records every manual admin top-up/deduction, distinct from the buyer-facing wallet
+   history: keeps the Telegram ID, amount, type, before/after balance, timestamp and
+   which admin performed it. */
+async function addAdminBalanceHistory(db, userId, entry) {
+  const key = kvKeyBalanceHistory(userId);
+  const list = (await getJSON(db, key, [])) || [];
+  list.unshift({ ...entry, userId, at: new Date().toISOString() });
+  if (list.length > 100) list.length = 100;
+  await putJSON(db, key, list);
+}
+
+/* Admin-initiated balance top-up: no floor beyond 0, always allowed. */
+async function adminTopUpBalance(db, adminId, userId, amount) {
   const user = await getUser(db, userId);
-  user.balance += delta;
+  const oldBalance = user.balance;
+  user.balance = oldBalance + amount;
   await saveUser(db, user);
-  await addWalletHistory(db, userId, { type: delta >= 0 ? "admin_credit" : "admin_debit", amount: Math.abs(delta) });
-  const lang = user.lang || "ru";
-  await sendMessage(
-    env,
-    userId,
-    delta >= 0
-      ? t(lang, "admin_balance_user_notify_credit", delta, user.balance)
-      : t(lang, "admin_balance_user_notify_debit", Math.abs(delta), user.balance),
-    backHomeKeyboard(lang)
-  );
-  return user;
+  await addAdminBalanceHistory(db, userId, { amount, type: "topup", oldBalance, newBalance: user.balance, adminId });
+  return { oldBalance, newBalance: user.balance };
+}
+
+/* Admin-initiated deduction: rejected if it would take the balance below 0. */
+async function adminDeductBalance(db, adminId, userId, amount) {
+  const user = await getUser(db, userId);
+  if (amount > user.balance) return { ok: false, balance: user.balance };
+  const oldBalance = user.balance;
+  user.balance = oldBalance - amount;
+  await saveUser(db, user);
+  await addAdminBalanceHistory(db, userId, { amount, type: "deduct", oldBalance, newBalance: user.balance, adminId });
+  return { ok: true, oldBalance, newBalance: user.balance };
 }
 
 /* ================= PROMO CODES ================= */
 
-const UNLIMITED_USES = 999999;
-
 async function createPromo(db, spec) {
   // spec: {code, type: 'percent'|'fixed', value, uses, days, minSum, firstPurchaseOnly, onePerUser}
-  // uses/days empty or 0 => unlimited / never expires ("forever"), per admin request.
-  const usesNum = Number(spec.uses);
-  const daysNum = Number(spec.days);
   const promo = {
     code: spec.code.toUpperCase(),
     type: spec.type,
     value: Number(spec.value),
-    usesLeft: Number.isFinite(usesNum) && usesNum > 0 ? usesNum : UNLIMITED_USES,
+    usesLeft: Number(spec.uses) || 0,
     minSum: Number(spec.minSum) || 0,
     firstPurchaseOnly: !!spec.firstPurchaseOnly,
     onePerUser: spec.onePerUser !== false,
-    expiresAt: Number.isFinite(daysNum) && daysNum > 0 ? new Date(Date.now() + daysNum * 86400000).toISOString() : null,
+    expiresAt: spec.days ? new Date(Date.now() + Number(spec.days) * 86400000).toISOString() : null,
     createdAt: new Date().toISOString(),
     active: true,
   };
@@ -856,16 +820,16 @@ async function consumePromo(db, code, userId) {
    marks the "spent" total, consumes the promo code, and pays referral commission.
    Kept in one place so promo codes and referral bonuses can never be skipped for
    any particular payment method. */
-async function finalizeOrderPaid(env, db, order) {
-  await walletCommitSpend(db, order.userId, order.total, order.orderNumber, order.itemName);
+async function finalizeOrderPaid(db, order) {
+  await walletCommitSpend(db, order.userId, order.total, order.orderNumber);
   if (order.promoCode) await consumePromo(db, order.promoCode, order.userId);
-  await applyReferralCommission(env, db, order.userId, order.total);
+  await applyReferralCommission(db, order.userId, order.total);
 }
 
 /* ================= ORDERS ================= */
 
 async function createOrder(db, params) {
-  // params: userId, category, itemId, itemName, price, discount, total, uidData, promoCode
+  // params: userId, category, itemId, itemName, price, discount, total, uidData, promoCode, items (optional cart lines)
   const internalId = crypto.randomUUID();
   const orderNumber = await generateOrderNumber(db);
   const order = {
@@ -880,6 +844,11 @@ async function createOrder(db, params) {
     total: params.total,
     uidData: params.uidData || {},
     promoCode: params.promoCode || null,
+    // Multiple distinct products bought together from the cart, each with its own
+    // qty/price/fulfilment status. Absent for legacy single-item orders.
+    items: params.items && params.items.length > 0
+      ? params.items.map((l) => ({ itemId: l.itemId, name: l.name, qty: l.qty, price: l.price, status: "pending", donixOrderId: null }))
+      : undefined,
     status: "pending_payment",
     donixOrderId: null,
     createdAt: new Date().toISOString(),
@@ -984,16 +953,46 @@ function tgMenuKeyboard(lang) {
   ]);
 }
 
-/* Product buttons carry no price (per request); prices live in a separate "Цены" text screen. */
-async function categoryKeyboard(db, lang, catKey) {
+function categoryBackTarget(catKey) {
+  return catKey.startsWith("pubg_") ? "menu:pubg" : catKey.startsWith("tg_") ? "menu:tg" : "menu:games";
+}
+
+/* Cart-style product screen: tapping a product adds one unit of it to the basket
+   (max 10 of each). A reset button always shows the running total; a "Далее" button
+   appears once at least one item is selected, to proceed to checkout. */
+async function cartKeyboard(db, lang, catKey, cart) {
   const cat = CATALOG[catKey];
   if (!cat) return ikb([[btn(t(lang, "btn_back"), "menu:games")]]);
-  const productButtons = cat.items.map((i) => btn(i.name, `prod:${catKey}:${i.id}`));
+  const resolvedItems = await getResolvedItems(db, catKey);
+  const items = cart && cart.catKey === catKey ? cart.items : {};
+  const productButtons = resolvedItems.map((i) => {
+    const qty = items[i.id] || 0;
+    const label = qty > 0 ? `${i.name} ×${qty}` : i.name;
+    return btn(label, `cartadd:${catKey}:${i.id}`);
+  });
   const rows = twoPerRow(productButtons);
-  const backTarget = catKey.startsWith("pubg_") ? "menu:pubg" : catKey.startsWith("tg_") ? "menu:tg" : "menu:games";
-  if (cat.items.length > 0) rows.push([btn(t(lang, "btn_prices"), `prices:${catKey}`)]);
+  const backTarget = categoryBackTarget(catKey);
+  if (resolvedItems.length > 0) rows.push([btn(t(lang, "btn_prices"), `prices:${catKey}`)]);
+  const total = cartTotal(cart && cart.catKey === catKey ? cart : null, resolvedItems);
+  if (total > 0) rows.push([btn(t(lang, "btn_cart_next"), `cartnext:${catKey}`)]);
+  rows.push([btn(t(lang, "btn_cart_reset", total), `cartreset:${catKey}`)]);
   rows.push([btn(t(lang, "btn_back"), backTarget)]);
   return ikb(rows);
+}
+
+/* Text shown above the cart keyboard: prompt + a compact summary line of what's selected. */
+async function cartText(db, lang, catKey, cart) {
+  const resolvedItems = await getResolvedItems(db, catKey);
+  const items = cart && cart.catKey === catKey ? cart.items : {};
+  const byId = Object.fromEntries(resolvedItems.map((i) => [i.id, i]));
+  const parts = [];
+  for (const id of Object.keys(items)) {
+    const qty = items[id];
+    const item = byId[id];
+    if (item && qty > 0) parts.push(`${item.name} ×${qty}`);
+  }
+  const summary = parts.length > 0 ? parts.join("     ") : t(lang, "cart_empty");
+  return [t(lang, "choose_product"), "", t(lang, "cart_title"), "", summary].join("\n");
 }
 
 /* Plain-text price list: each item on its own line, price written at the end. */
@@ -1164,8 +1163,14 @@ async function handleCallbackQuery(env, db, cq) {
         await editMessage(env, chatId, messageId, t(lang, "enter_username_tg"), backHomeKeyboard(lang));
         return answerCallback(env, cq.id);
       }
-      const kb = await categoryKeyboard(db, lang, catKey);
-      await editMessage(env, chatId, messageId, t(lang, "choose_product"), kb);
+      let cart = await getCart(db, userId);
+      if (!cart || cart.catKey !== catKey) {
+        cart = { catKey, items: {} };
+        await saveCart(db, userId, cart);
+      }
+      const kb = await cartKeyboard(db, lang, catKey, cart);
+      const text = await cartText(db, lang, catKey, cart);
+      await editMessage(env, chatId, messageId, text, kb);
       return answerCallback(env, cq.id);
     }
 
@@ -1176,7 +1181,7 @@ async function handleCallbackQuery(env, db, cq) {
       return answerCallback(env, cq.id);
     }
 
-    if (ns === "prod") {
+    if (ns === "cartadd") {
       const catKey = a;
       const itemId = b;
       const cat = CATALOG[catKey];
@@ -1185,35 +1190,63 @@ async function handleCallbackQuery(env, db, cq) {
         await answerCallback(env, cq.id, t(lang, "invalid_input"), true);
         return;
       }
-      await editMessage(env, chatId, messageId, qtyText(lang, item, 1), qtyKeyboard(lang, catKey, itemId, 1));
-      return answerCallback(env, cq.id);
-    }
-
-    if (ns === "qty") {
-      const catKey = a;
-      const itemId = b;
-      const qty = Math.max(1, Math.min(10, parseInt(c, 10) || 1));
-      const item = await findItem(db, catKey, itemId);
-      if (!item) {
-        await answerCallback(env, cq.id, t(lang, "invalid_input"), true);
+      let cart = await getCart(db, userId);
+      if (!cart || cart.catKey !== catKey) cart = { catKey, items: {} };
+      const cur = cart.items[itemId] || 0;
+      if (cur >= 10) {
+        await answerCallback(env, cq.id, t(lang, "cart_max_reached"), true);
         return;
       }
-      await editMessage(env, chatId, messageId, qtyText(lang, item, qty), qtyKeyboard(lang, catKey, itemId, qty));
+      cart.items[itemId] = cur + 1;
+      await saveCart(db, userId, cart);
+      const kb = await cartKeyboard(db, lang, catKey, cart);
+      const text = await cartText(db, lang, catKey, cart);
+      await editMessage(env, chatId, messageId, text, kb);
       return answerCallback(env, cq.id);
     }
 
-    if (ns === "qtyok") {
+    if (ns === "cartreset") {
       const catKey = a;
-      const itemId = b;
-      const qty = Math.max(1, Math.min(10, parseInt(c, 10) || 1));
+      const cart = { catKey, items: {} };
+      await saveCart(db, userId, cart);
+      const kb = await cartKeyboard(db, lang, catKey, cart);
+      const text = await cartText(db, lang, catKey, cart);
+      await editMessage(env, chatId, messageId, text, kb);
+      return answerCallback(env, cq.id);
+    }
+
+    if (ns === "cartnext") {
+      const catKey = a;
       const cat = CATALOG[catKey];
-      const item = await findItem(db, catKey, itemId);
-      if (!cat || !item) {
+      const cart = await getCart(db, userId);
+      if (!cat || !cart || cart.catKey !== catKey) {
         await answerCallback(env, cq.id, t(lang, "invalid_input"), true);
         return;
       }
-      const itemName = qty > 1 ? `${item.name} × ${qty}` : item.name;
-      const stateData = { catKey, itemId, itemName, price: item.price * qty, inputType: cat.inputType };
+      const resolvedItems = await getResolvedItems(db, catKey);
+      const byId = Object.fromEntries(resolvedItems.map((i) => [i.id, i]));
+      const lines = [];
+      let total = 0;
+      for (const itemId of Object.keys(cart.items)) {
+        const qty = cart.items[itemId];
+        const item = byId[itemId];
+        if (!item || qty <= 0) continue;
+        lines.push({ itemId, name: item.name, qty, price: item.price, lineTotal: item.price * qty });
+        total += item.price * qty;
+      }
+      if (lines.length === 0) {
+        await answerCallback(env, cq.id, t(lang, "cart_choose_at_least_one"), true);
+        return;
+      }
+      const itemName = lines.map((l) => (l.qty > 1 ? `${l.name} × ${l.qty}` : l.name)).join(", ");
+      const stateData = {
+        catKey,
+        itemId: lines.map((l) => l.itemId).join("+"),
+        itemName,
+        price: total,
+        inputType: cat.inputType,
+        items: lines,
+      };
       if (cat.inputType === "ml_id") {
         await setState(db, userId, { step: "await_ml_player", data: stateData });
         await editMessage(env, chatId, messageId, t(lang, "enter_player_id_mlbb"), backHomeKeyboard(lang));
@@ -1222,6 +1255,7 @@ async function handleCallbackQuery(env, db, cq) {
         const promptKey = inputPromptKey(cat.inputType, null);
         await editMessage(env, chatId, messageId, t(lang, promptKey), backHomeKeyboard(lang));
       }
+      await clearCart(db, userId);
       return answerCallback(env, cq.id);
     }
 
@@ -1260,7 +1294,7 @@ async function handleCallbackQuery(env, db, cq) {
       }
       order.status = "paid";
       await saveOrder(db, order);
-      await finalizeOrderPaid(env, db, order);
+      await finalizeOrderPaid(db, order);
 
       await editMessage(
         env,
@@ -1364,12 +1398,13 @@ async function handleCallbackQuery(env, db, cq) {
         const key = await walletHistoryKey(userId);
         const list = (await getJSON(db, key, [])) || [];
         if (list.length === 0) {
-          await editMessage(env, chatId, messageId, t(lang, "history_empty"), walletKeyboard(lang));
+          await editMessage(env, chatId, messageId, t(lang, "orders_empty"), walletKeyboard(lang));
         } else {
-          const lines = [t(lang, "history_title"), ""].concat(
-            list.slice(0, 15).map((h) => `${h.at.slice(0, 10)}\n${walletHistoryLine(lang, h)}`)
-          );
-          await editMessage(env, chatId, messageId, lines.join("\n"), walletKeyboard(lang));
+          const lines = list
+            .slice(0, 15)
+            .map((h) => `${h.at.slice(0, 10)} — ${h.type} — ${h.amount} ${t(lang, "kg_som")}`)
+            .join("\n");
+          await editMessage(env, chatId, messageId, lines, walletKeyboard(lang));
         }
       }
       return answerCallback(env, cq.id);
@@ -1473,6 +1508,42 @@ async function processDonixOrder(env, db, order, lang, chatId) {
   const cat = CATALOG[order.category];
   const donixCategory = cat ? cat.donixCategory : order.category;
 
+  // Cart orders bundle several distinct products together — Donix takes one product
+  // per order call, so create one call per cart line, each with its own external id.
+  if (order.items && order.items.length > 0) {
+    const results = [];
+    for (const line of order.items) {
+      const payload = {
+        external_id: `${order.internalId}::${line.itemId}`,
+        order_number: order.orderNumber,
+        category: donixCategory,
+        product_id: line.itemId,
+        quantity: line.qty,
+        target: order.uidData,
+      };
+      results.push(await donixCreateOrder(env, payload));
+    }
+
+    if (results.some((r) => !r.ok || !r.data)) {
+      order.status = "failed";
+      order.items.forEach((line) => (line.status = "failed"));
+      await saveOrder(db, order);
+      const refundOk = await idempotentOnce(db, "refund", order.internalId);
+      if (refundOk) await walletRelease(db, order.userId, order.total, `order_failed:${order.orderNumber}`);
+      await sendMessage(env, chatId, t(lang, "failed"), backHomeKeyboard(lang));
+      return;
+    }
+
+    order.items.forEach((line, idx) => {
+      line.donixOrderId = results[idx].data.id || results[idx].data.order_id || null;
+      line.status = "processing";
+    });
+    order.status = "processing";
+    await saveOrder(db, order);
+    await sendMessage(env, chatId, t(lang, "processing"), backHomeKeyboard(lang));
+    return;
+  }
+
   const payload = {
     external_id: order.internalId,
     order_number: order.orderNumber,
@@ -1501,7 +1572,14 @@ async function processDonixOrder(env, db, order, lang, chatId) {
 
 /* called from /donix-webhook when a status update arrives */
 async function handleDonixStatusUpdate(env, db, externalId, status) {
-  const order = await getOrder(db, externalId);
+  // Cart (multi-item) orders send one Donix order per line, tagged "<internalId>::<itemId>".
+  let order = await getOrder(db, externalId);
+  let cartLine = null;
+  if (!order && externalId.includes("::")) {
+    const [baseId, lineItemId] = externalId.split("::");
+    order = await getOrder(db, baseId);
+    if (order && order.items) cartLine = order.items.find((l) => l.itemId === lineItemId) || null;
+  }
   if (!order) return;
 
   const idempKey = `${externalId}:${status}`;
@@ -1510,6 +1588,10 @@ async function handleDonixStatusUpdate(env, db, externalId, status) {
 
   const user = await getUser(db, order.userId);
   const lang = user.lang || "ru";
+
+  if (cartLine) {
+    return handleCartLineStatusUpdate(env, db, order, cartLine, status, user, lang);
+  }
 
   if (status === "processing") {
     order.status = "processing";
@@ -1543,6 +1625,57 @@ async function handleDonixStatusUpdate(env, db, externalId, status) {
     const refundOk = await idempotentOnce(db, "refund", externalId);
     if (refundOk) await walletRelease(db, order.userId, order.total, `donix_refunded:${order.orderNumber}`);
     await sendMessage(env, user.id, t(lang, "refunded"), backHomeKeyboard(lang));
+  }
+}
+
+/* Updates the status of a single cart line inside a multi-item order, refunds just that
+   line's amount if it fails/gets refunded, and finalizes the order once every line has
+   reached a terminal state (completed/failed/refunded). */
+async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user, lang) {
+  if (status === "processing") {
+    cartLine.status = "processing";
+    if (order.status !== "processing" && order.status !== "completed" && order.status !== "failed") {
+      order.status = "processing";
+      await sendMessage(env, user.id, t(lang, "processing"), backHomeKeyboard(lang));
+    }
+    await saveOrder(db, order);
+    return;
+  }
+
+  if (status === "failed" || status === "refunded") {
+    cartLine.status = status;
+    const refundOk = await idempotentOnce(db, "refund", `${order.internalId}::${cartLine.itemId}`);
+    if (refundOk) {
+      await walletRelease(db, order.userId, cartLine.price * cartLine.qty, `donix_${status}:${order.orderNumber}:${cartLine.itemId}`);
+    }
+  } else if (status === "completed") {
+    cartLine.status = "completed";
+  }
+
+  const allDone = order.items.every((l) => ["completed", "failed", "refunded"].includes(l.status));
+  if (allDone) {
+    const anyIssue = order.items.some((l) => l.status === "failed" || l.status === "refunded");
+    order.status = anyIssue ? "failed" : "completed";
+    await saveOrder(db, order);
+    if (order.status === "completed") {
+      const completedText = [
+        t(lang, "completed"),
+        `№ ${order.orderNumber}`,
+        order.itemName,
+        "",
+        t(lang, "order_completed_review_hint"),
+      ].join("\n");
+      await sendMessage(env, user.id, completedText, {
+        inline_keyboard: [
+          [{ text: t(lang, "btn_leave_review"), url: "https://t.me/nurtilekshop" }],
+          [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
+        ],
+      });
+    } else {
+      await sendMessage(env, user.id, t(lang, "failed"), backHomeKeyboard(lang));
+    }
+  } else {
+    await saveOrder(db, order);
   }
 }
 
@@ -1636,7 +1769,7 @@ async function handleMessage(env, db, msg) {
       return;
     }
     if (!validation.data || validation.data.valid === false) {
-      await sendMessage(env, chatId, t(lang, "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `prod:${state.data.catKey}:${state.data.itemId}`)]]));
+      await sendMessage(env, chatId, t(lang, "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `cat:${state.data.catKey}`)]]));
       return;
     }
     const uidData = { UID: uid, Nickname: validation.data.nickname || validation.data.name || "—" };
@@ -1653,6 +1786,7 @@ async function handleMessage(env, db, msg) {
       total: prompt.total,
       uidData,
       promoCode: prompt.promoCode,
+      items: state.data.items,
     });
     await clearState(db, userId);
     await sendMessage(env, chatId, `№ ${order.orderNumber}
@@ -1684,7 +1818,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       return;
     }
     if (!validation.data || validation.data.valid === false) {
-      await sendMessage(env, chatId, t(lang, "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `prod:${state.data.catKey}:${state.data.itemId}`)]]));
+      await sendMessage(env, chatId, t(lang, "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `cat:${state.data.catKey}`)]]));
       return;
     }
     const uidData = {
@@ -1703,6 +1837,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       total: prompt.total,
       uidData,
       promoCode: prompt.promoCode,
+      items: state.data.items,
     });
     await clearState(db, userId);
     await sendMessage(env, chatId, `№ ${order.orderNumber}
@@ -1757,10 +1892,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
 
   if (state.step === "await_promo_code") {
     await clearState(db, userId);
-    // A large sentinel sum here: this is just checking the code itself is valid
-    // (exists, active, not expired, not exhausted, not already used by this user).
-    // The real minimum-sum check happens against the real order total at checkout.
-    const check = await validatePromo(db, text, userId, Number.MAX_SAFE_INTEGER);
+    const check = await validatePromo(db, text, userId, 0);
     if (!check.ok) {
       await sendMessage(env, chatId, t(lang, "promo_invalid"), backHomeKeyboard(lang));
       return;
@@ -1768,7 +1900,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     // Stored separately from the step-machine state so it isn't lost when the
     // user goes on to browse categories/products before checking out.
     await db.put(kvKeyActivePromo(userId), text.toUpperCase());
-    await sendMessage(env, chatId, t(lang, "promo_applied_detail", check.promo), backHomeKeyboard(lang));
+    await sendMessage(env, chatId, `✅ ${text.toUpperCase()}`, backHomeKeyboard(lang));
     return;
   }
 
@@ -1806,20 +1938,9 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       return;
     }
 
-    // Balance is credited automatically by the Finik webhook right after a successful
-    // payment. This button is a manual fallback in case that webhook is ever delayed
-    // or missed — it DMs the admin with the top-up ID so it can be credited by hand
-    // from "Настройки → Баланс пользователя".
-    const supportText = `Оплата не пополнилась. topupId: ${topupId}, userId: ${userId}, сумма: ${amount} сом`;
     await sendMessage(env, chatId, `${amount} ${t(lang, "kg_som")}`, {
       inline_keyboard: [
         [{ text: "💳 Оплатить", url: payment.paymentUrl }],
-        [
-          {
-            text: "❓ Оплатил(а), но баланс не пополнился",
-            url: `https://t.me/${env.ADMIN_USERNAME}?text=${encodeURIComponent(supportText)}`,
-          },
-        ],
         [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
       ],
     });
@@ -1841,6 +1962,7 @@ function adminMainKeyboard() {
   return ikb([
     [btn("📊 Статистика", "admin:stats"), btn("👥 Пользователи", "admin:users")],
     [btn("📦 Заказы", "admin:orders"), btn("💰 Кошельки", "admin:wallets")],
+    [btn("💵 Балансы", "admin:balances")],
     [btn("🎮 Каталог и цены", "admin:catalog"), btn("🎟 Промокоды", "admin:promos")],
     [btn("🤝 Рефералка", "admin:referral")],
     [btn("📢 Рассылка", "admin:broadcast"), btn("💳 Баланс Donix", "admin:donixbalance")],
@@ -1882,6 +2004,15 @@ async function adminCategoryItemsView(db, catKey) {
   return { text: `${CATALOG_LABELS[catKey] || catKey}\nВыберите товар, чтобы изменить его цену:`, keyboard: ikb(rows) };
 }
 
+function adminBalanceView(user) {
+  const text = [`👤 Пользователь: ${user.id}`, `💰 Баланс: ${user.balance} сом`].join("\n");
+  const keyboard = ikb([
+    [btn("➕ Пополнить", `admin:baltopup:${user.id}`), btn("➖ Списать", `admin:baldeduct:${user.id}`)],
+    [btn("⬅️", "admin:home")],
+  ]);
+  return { text, keyboard };
+}
+
 async function handleAdminCallback(env, db, cq, a, b, c, lang) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
@@ -1920,35 +2051,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     await editMessage(env, chatId, messageId, text, ikb([[btn("⬅️", "admin:home")]]));
   } else if (a === "promos") {
     await setState(db, userId, { step: "admin_create_promo", data: {} });
-    await editMessage(
-      env,
-      chatId,
-      messageId,
-      t(lang, "promo_admin_create_hint"),
-      ikb([[btn("📋 Список промокодов", "admin:promolist")], [btn("⬅️", "admin:home")]])
-    );
-  } else if (a === "promolist") {
-    await clearState(db, userId);
-    const keys = await db.list({ prefix: "promo:" });
-    const lines = ["🎟 <b>Активные промокоды:</b>", ""];
-    let count = 0;
-    for (const k of keys.keys) {
-      if (k.name.startsWith("promouse:")) continue; // skip per-user usage markers
-      const p = await getJSON(db, k.name);
-      if (!p) continue;
-      count++;
-      const valueLabel = p.type === "percent" ? `${p.value}%` : `${p.value} сом`;
-      const uses = p.usesLeft >= UNLIMITED_USES ? "без ограничений" : `${p.usesLeft}`;
-      const expires = p.expiresAt ? new Date(p.expiresAt).toLocaleDateString("ru-RU") : "навсегда";
-      lines.push(
-        `<b>${p.code}</b> — ${valueLabel}${p.active ? "" : " (выключен)"}\n` +
-          `Осталось использований: ${uses} | Срок: ${expires} | Мин. сумма: ${p.minSum} сом | 1 на аккаунт: ${
-            p.onePerUser ? "да" : "нет"
-          }`
-      );
-    }
-    if (count === 0) lines.push("Пока нет ни одного промокода.");
-    await editMessage(env, chatId, messageId, lines.join("\n\n"), ikb([[btn("⬅️", "admin:promos")]]));
+    await editMessage(env, chatId, messageId, t(lang, "promo_admin_create_hint"), ikb([[btn("⬅️", "admin:home")]]));
   } else if (a === "catalog") {
     await clearState(db, userId);
     await editMessage(
@@ -2031,19 +2134,18 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     }
     if (users.length === 0) lines.push("Пока нет пользователей.");
     await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:home")]]));
-  } else if (a === "settings") {
-    await clearState(db, userId);
-    await editMessage(
-      env,
-      chatId,
-      messageId,
-      "🛠 Настройки\n\nЗдесь можно вручную начислить или списать деньги с баланса любого пользователя.",
-      ikb([[btn(t(lang, "btn_manage_balance"), "admin:balancefind")], [btn("⬅️", "admin:home")]])
-    );
-  } else if (a === "balancefind") {
-    await setState(db, userId, { step: "admin_balance_find_user", data: {} });
-    await editMessage(env, chatId, messageId, t(lang, "admin_ask_user_id"), ikb([[btn("⬅️", "admin:settings")]]));
-  } else if (a === "logs") {
+  } else if (a === "balances") {
+    await setState(db, userId, { step: "admin_balance_lookup", data: {} });
+    await editMessage(env, chatId, messageId, "Введите Telegram ID пользователя:", ikb([[btn("⬅️", "admin:home")]]));
+  } else if (a === "baltopup") {
+    const targetId = b;
+    await setState(db, userId, { step: "admin_balance_topup", data: { targetId } });
+    await editMessage(env, chatId, messageId, "Введите сумму пополнения (сом):", ikb([[btn("⬅️", "admin:home")]]));
+  } else if (a === "baldeduct") {
+    const targetId = b;
+    await setState(db, userId, { step: "admin_balance_deduct", data: { targetId } });
+    await editMessage(env, chatId, messageId, "Введите сумму списания (сом):", ikb([[btn("⬅️", "admin:home")]]));
+  } else if (a === "settings" || a === "logs") {
     await editMessage(
       env,
       chatId,
@@ -2092,7 +2194,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     order.status = "paid";
     order.paymentMethod = "terminal";
     await saveOrder(db, order);
-    await finalizeOrderPaid(env, db, order);
+    await finalizeOrderPaid(db, order);
 
     const buyer = await getUser(db, order.userId);
     const buyerLang = buyer.lang || "ru";
@@ -2154,54 +2256,77 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
   if (state.step === "admin_create_promo") {
     const parts = text.split(";").map((p) => p.trim());
     if (parts.length < 3) {
-      await sendMessage(env, chatId, "❌ Неверный формат.\n\n" + t(lang, "promo_admin_create_hint"));
+      await sendMessage(env, chatId, "Неверный формат. " + t(lang, "promo_admin_create_hint"));
       return;
     }
     const [code, type, value, uses, days, minSum] = parts;
-    if (!code || !["percent", "fixed"].includes((type || "").toLowerCase()) || !value || !Number.isFinite(Number(value))) {
-      await sendMessage(env, chatId, "❌ Неверный формат.\n\n" + t(lang, "promo_admin_create_hint"));
+    if (!code || !["percent", "fixed"].includes(type) || !value) {
+      await sendMessage(env, chatId, "Неверный формат. " + t(lang, "promo_admin_create_hint"));
       return;
     }
     const promo = await createPromo(db, {
       code,
-      type: type.toLowerCase(),
+      type,
       value,
-      uses,
-      days,
-      minSum,
+      uses: uses || 100,
+      days: days || 30,
+      minSum: minSum || 0,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, t(lang, "promo_created_summary", promo), adminMainKeyboard());
+    await sendMessage(env, chatId, `✅ Промокод создан: ${promo.code}`, adminMainKeyboard());
     return;
   }
 
-  if (state.step === "admin_balance_find_user") {
-    const targetId = parseInt(text, 10);
-    if (!Number.isFinite(targetId)) {
-      await sendMessage(env, chatId, t(lang, "invalid_input"));
+  if (state.step === "admin_balance_lookup") {
+    const targetId = text.trim();
+    if (!/^\d+$/.test(targetId)) {
+      await sendMessage(env, chatId, "Неверный Telegram ID. Отправьте число, например: 123456789");
       return;
     }
-    const existing = await getJSON(db, kvKeyUser(targetId));
-    if (!existing) {
-      await sendMessage(env, chatId, t(lang, "admin_user_not_found"), ikb([[btn("⬅️", "admin:settings")]]));
-      return;
-    }
-    await setState(db, userId, { step: "admin_balance_amount", data: { targetId } });
-    await sendMessage(env, chatId, t(lang, "admin_ask_balance_amount", existing), ikb([[btn("⬅️", "admin:settings")]]));
-    return;
-  }
-
-  if (state.step === "admin_balance_amount") {
-    const { targetId } = state.data;
-    const cleaned = text.replace(/\s/g, "").replace(",", ".").replace(/^\+/, "");
-    const delta = Number(cleaned);
-    if (!Number.isFinite(delta) || delta === 0) {
-      await sendMessage(env, chatId, t(lang, "invalid_input"));
-      return;
-    }
-    const updated = await walletAdminAdjust(env, db, targetId, delta);
     await clearState(db, userId);
-    await sendMessage(env, chatId, t(lang, "admin_balance_updated", updated, delta), adminMainKeyboard());
+    const targetUser = await getUser(db, targetId);
+    const view = adminBalanceView(targetUser);
+    await sendMessage(env, chatId, view.text, view.keyboard);
+    return;
+  }
+
+  if (state.step === "admin_balance_topup") {
+    const { targetId } = state.data;
+    const amount = Number(text.replace(",", "."));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await sendMessage(env, chatId, "Неверная сумма. Отправьте число, например: 200");
+      return;
+    }
+    const { oldBalance, newBalance } = await adminTopUpBalance(db, userId, targetId, amount);
+    await clearState(db, userId);
+    await sendMessage(
+      env,
+      chatId,
+      `✅ Баланс изменён\n\nБыло: ${oldBalance} сом\nИзменение: +${amount} сом\nСтало: ${newBalance} сом`,
+      adminMainKeyboard()
+    );
+    return;
+  }
+
+  if (state.step === "admin_balance_deduct") {
+    const { targetId } = state.data;
+    const amount = Number(text.replace(",", "."));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await sendMessage(env, chatId, "Неверная сумма. Отправьте число, например: 150");
+      return;
+    }
+    const result = await adminDeductBalance(db, userId, targetId, amount);
+    if (!result.ok) {
+      await sendMessage(env, chatId, `❌ Недостаточно средств на балансе. Текущий баланс: ${result.balance} сом`);
+      return;
+    }
+    await clearState(db, userId);
+    await sendMessage(
+      env,
+      chatId,
+      `✅ Баланс изменён\n\nБыло: ${result.oldBalance} сом\nИзменение: -${amount} сом\nСтало: ${result.newBalance} сом`,
+      adminMainKeyboard()
+    );
     return;
   }
 
@@ -2401,7 +2526,7 @@ async function routePaymentWebhook(env, db, request) {
     order.paymentMethod = "bank";
     order.transactionId = transactionId;
     await saveOrder(db, order);
-    await finalizeOrderPaid(env, db, order);
+    await finalizeOrderPaid(db, order);
 
     const buyer = await getUser(db, order.userId);
     const buyerLang = buyer.lang || "ru";
