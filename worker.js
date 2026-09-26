@@ -2160,6 +2160,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
   } else if (a === "promolist") {
     const promoKeys = await db.list({ prefix: "promo:" });
     const lines = ["📋 Промокоды:"];
+    const rows = [];
     let count = 0;
     for (const k of promoKeys.keys) {
       if (k.name.startsWith("promouse:")) continue;
@@ -2170,9 +2171,50 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       const expText = p.expiresAt ? `до ${p.expiresAt.slice(0, 10)}` : "бессрочно";
       const valText = p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
       lines.push(`\n${p.active ? "🟢" : "🔴"} ${p.code} — ${valText}\nИспользований: ${usesText}${p.onePerUser ? " (1 на аккаунт)" : ""}\nСрок: ${expText}`);
+      rows.push([
+        p.active
+          ? btn(`🚫 Отменить ${p.code}`, `admin:promotoggle:${p.code}:off`)
+          : btn(`♻️ Включить ${p.code}`, `admin:promotoggle:${p.code}:on`),
+      ]);
     }
     if (count === 0) lines.push("Пока нет промокодов.");
-    await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:promos")]]));
+    rows.push([btn("⬅️", "admin:promos")]);
+    await editMessage(env, chatId, messageId, lines.join("\n"), ikb(rows));
+  } else if (a === "promotoggle") {
+    const code = b;
+    const wantOn = c === "on";
+    const promo = await getJSON(db, kvKeyPromo(code));
+    if (!promo) {
+      await answerCallback(env, cq.id, "Промокод не найден.", true);
+      return;
+    }
+    promo.active = wantOn;
+    await putJSON(db, kvKeyPromo(promo.code), promo);
+    await answerCallback(env, cq.id, wantOn ? `✅ ${promo.code} включён` : `🚫 ${promo.code} отменён`);
+    // re-render the list so the status/button updates in place
+    const promoKeys = await db.list({ prefix: "promo:" });
+    const lines = ["📋 Промокоды:"];
+    const rows = [];
+    let count = 0;
+    for (const k of promoKeys.keys) {
+      if (k.name.startsWith("promouse:")) continue;
+      const p = await getJSON(db, k.name);
+      if (!p) continue;
+      count++;
+      const usesText = p.usesLeft === null ? "∞ (без ограничения)" : `осталось ${p.usesLeft}`;
+      const expText = p.expiresAt ? `до ${p.expiresAt.slice(0, 10)}` : "бессрочно";
+      const valText = p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
+      lines.push(`\n${p.active ? "🟢" : "🔴"} ${p.code} — ${valText}\nИспользований: ${usesText}${p.onePerUser ? " (1 на аккаунт)" : ""}\nСрок: ${expText}`);
+      rows.push([
+        p.active
+          ? btn(`🚫 Отменить ${p.code}`, `admin:promotoggle:${p.code}:off`)
+          : btn(`♻️ Включить ${p.code}`, `admin:promotoggle:${p.code}:on`),
+      ]);
+    }
+    if (count === 0) lines.push("Пока нет промокодов.");
+    rows.push([btn("⬅️", "admin:promos")]);
+    await editMessage(env, chatId, messageId, lines.join("\n"), ikb(rows));
+    return;
   } else if (a === "catalog") {
     await clearState(db, userId);
     await editMessage(
