@@ -429,8 +429,8 @@ function kvKeyPromo(code) {
 function kvKeyPromoUse(code, userId) {
   return `promouse:${code.toUpperCase()}:${userId}`;
 }
-function kvKeyCounter(dateStr) {
-  return `ordercounter:${dateStr}`;
+function kvKeyCounter() {
+  return `ordercounter:global`;
 }
 function kvKeyConfig(key) {
   return `config:${key}`;
@@ -529,23 +529,15 @@ async function clearState(db, id) {
   await db.delete(kvKeyState(id));
 }
 
-/* order number generator: NS-YYYYMMDD-0001, unique via KV counter */
+/* order number generator: plain sequential number (1, 2, 3, ...), no date —
+   simple to read out loud and easy for the admin to check "did order №N go through". */
 async function generateOrderNumber(db) {
-  const now = new Date();
-  const dateStr = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, "0")}${String(
-    now.getUTCDate()
-  ).padStart(2, "0")}`;
-  const counterKey = kvKeyCounter(dateStr);
-  let n = 1;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const current = await db.get(counterKey);
-    const next = current ? parseInt(current, 10) + 1 : 1;
-    n = next;
-    // best-effort increment (KV has no atomic increment; acceptable for this scale)
-    await db.put(counterKey, String(next));
-    break;
-  }
-  return `NS-${dateStr}-${String(n).padStart(4, "0")}`;
+  const counterKey = kvKeyCounter();
+  const current = await db.get(counterKey);
+  const next = current ? parseInt(current, 10) + 1 : 1;
+  // best-effort increment (KV has no atomic increment; acceptable for this scale)
+  await db.put(counterKey, String(next));
+  return String(next);
 }
 
 /* ================= TELEGRAM API ================= */
@@ -1554,7 +1546,8 @@ async function handleMessage(env, db, msg) {
       promoCode: prompt.promoCode,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, `${prompt.text}
+    await sendMessage(env, chatId, `№ ${order.orderNumber}
+${prompt.text}
 
 ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
     return;
@@ -1603,7 +1596,8 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       promoCode: prompt.promoCode,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, `${prompt.text}
+    await sendMessage(env, chatId, `№ ${order.orderNumber}
+${prompt.text}
 
 ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
     return;
@@ -1645,7 +1639,8 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       promoCode: prompt.promoCode,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, `${prompt.text}
+    await sendMessage(env, chatId, `№ ${order.orderNumber}
+${prompt.text}
 
 ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
     return;
