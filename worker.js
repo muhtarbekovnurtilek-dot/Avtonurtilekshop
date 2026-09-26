@@ -322,6 +322,26 @@ function t(lang, key, ...args) {
   return typeof v === "function" ? v(...args) : v;
 }
 
+/* Human-readable label for a wallet history entry ("📜 История"), by entry.type. */
+const WALLET_HISTORY_LABELS = {
+  ru: {
+    topup: "➕ Пополнение",
+    purchase: "🛒 Потрачено",
+    refund: "💸 Возврат средств",
+    referral: "🤝 Реферальный бонус",
+  },
+  kg: {
+    topup: "➕ Толуктоо",
+    purchase: "🛒 Коротулду",
+    refund: "💸 Каражат кайтарылды",
+    referral: "🤝 Реферал бонусу",
+  },
+};
+function walletHistoryTypeLabel(lang, type) {
+  const table = WALLET_HISTORY_LABELS[lang] || WALLET_HISTORY_LABELS.ru;
+  return table[type] || WALLET_HISTORY_LABELS.ru[type] || type;
+}
+
 /* ================= CATALOG ================= */
 
 const CATALOG = {
@@ -770,11 +790,14 @@ async function adminDeductBalance(db, adminId, userId, amount) {
 
 async function createPromo(db, spec) {
   // spec: {code, type: 'percent'|'fixed', value, uses, days, minSum, firstPurchaseOnly, onePerUser}
+  // uses: null/undefined/Infinity means unlimited total redemptions (usesLeft stored as null).
+  // days: null/undefined means it never expires ("вечный" promo code).
+  const unlimitedUses = spec.uses === null || spec.uses === undefined || spec.uses === Infinity;
   const promo = {
     code: spec.code.toUpperCase(),
     type: spec.type,
     value: Number(spec.value),
-    usesLeft: Number(spec.uses) || 0,
+    usesLeft: unlimitedUses ? null : Number(spec.uses) || 0,
     minSum: Number(spec.minSum) || 0,
     firstPurchaseOnly: !!spec.firstPurchaseOnly,
     onePerUser: spec.onePerUser !== false,
@@ -792,7 +815,8 @@ async function validatePromo(db, code, userId, sum) {
   if (promo.expiresAt && new Date(promo.expiresAt).getTime() < Date.now()) {
     return { ok: false, reason: "expired" };
   }
-  if (promo.usesLeft <= 0) return { ok: false, reason: "exhausted" };
+  // usesLeft === null means unlimited total redemptions (only onePerUser limits a given account).
+  if (promo.usesLeft !== null && promo.usesLeft <= 0) return { ok: false, reason: "exhausted" };
   if (sum < promo.minSum) return { ok: false, reason: "min_sum" };
   if (promo.onePerUser) {
     const used = await db.get(kvKeyPromoUse(code, userId));
@@ -810,8 +834,10 @@ async function validatePromo(db, code, userId, sum) {
 async function consumePromo(db, code, userId) {
   const promo = await getJSON(db, kvKeyPromo(code));
   if (!promo) return;
-  promo.usesLeft = Math.max(0, promo.usesLeft - 1);
-  await putJSON(db, kvKeyPromo(code), promo);
+  if (promo.usesLeft !== null) {
+    promo.usesLeft = Math.max(0, promo.usesLeft - 1);
+    await putJSON(db, kvKeyPromo(code), promo);
+  }
   await db.put(kvKeyPromoUse(code, userId), "1");
   await db.delete(kvKeyActivePromo(userId));
 }
@@ -1135,8 +1161,20 @@ async function handleCallbackQuery(env, db, cq) {
   const messageId = cq.message.message_id;
   const userId = cq.from.id;
   const user = await getUser(db, userId);
-  if (cq.from.username) user.username = cq.from.username;
-  await saveUser(db, user);
+  // BUGFIX: this used to unconditionally re-save the full user record on every single
+  // button tap. getUser/saveUser is a read-modify-write over the whole KV record (not an
+  // atomic increment), so if a payment webhook credited the balance (getUser -> balance
+  // += amount -> saveUser) in between this handler's own read and write, this handler
+  // would blindly overwrite it with the stale, pre-credit balance — silently reverting a
+  // top-up back down, while the wallet history entry (written first inside the webhook)
+  // stayed intact. That's exactly why balance sometimes didn't update even though history
+  // showed the payment, and why reloading/tapping around didn't help — every tap was
+  // itself another chance to clobber the credit. Now we only write back when something in
+  // this handler actually changed.
+  if (cq.from.username && cq.from.username !== user.username) {
+    user.username = cq.from.username;
+    await saveUser(db, user);
+  }
   const lang = user.lang || "ru";
 
   const [ns, a, b, c] = data.split(":");
@@ -1402,7 +1440,10 @@ async function handleCallbackQuery(env, db, cq) {
         } else {
           const lines = list
             .slice(0, 15)
-            .map((h) => `${h.at.slice(0, 10)} — ${h.type} — ${h.amount} ${t(lang, "kg_som")}`)
+            .map((h) => {
+              const sign = h.type === "topup" || h.type === "refund" || h.type === "referral" ? "+" : "−";
+              return `${h.at.slice(0, 10)} — ${walletHistoryTypeLabel(lang, h.type)} — ${sign}${h.amount} ${t(lang, "kg_som")}`;
+            })
             .join("\n");
           await editMessage(env, chatId, messageId, lines, walletKeyboard(lang));
         }
@@ -1717,8 +1758,13 @@ async function handleMessage(env, db, msg) {
   const isNewUser = !existingUserRecord;
 
   const user = await getUser(db, userId);
-  if (msg.from.username) user.username = msg.from.username;
-  await saveUser(db, user);
+  // Same read-modify-write race as in handleCallbackQuery — only write back if the
+  // username actually changed, so a text message can't clobber a concurrent balance
+  // credit from the payment webhook.
+  if (msg.from.username && msg.from.username !== user.username) {
+    user.username = msg.from.username;
+    await saveUser(db, user);
+  }
   const lang = user.lang || "ru";
 
   if (text.startsWith("/start")) {
@@ -1944,6 +1990,19 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
         [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
       ],
     });
+
+    // Let the admin see every top-up request as it's created, with its id and username,
+    // so they can check whether it actually landed in Finik/Donix and, if not, credit it
+    // manually right from this message. Normally the /payment-webhook confirms it
+    // automatically and this message can just be ignored.
+    await sendMessage(
+      env,
+      env.ADMIN_ID,
+      `🧾 Новое пополнение (ожидает оплаты)\nID: ${topupId}\nUser: ${userId} (@${user.username || "-"})\nСумма: ${amount} ${t(lang, "kg_som")}`,
+      ikb([
+        [btn("✅ Зачислить", `admin:topupok:${topupId}`), btn("❌ Отклонить", `admin:topupno:${topupId}`)],
+      ])
+    );
     return;
   }
 
@@ -1962,7 +2021,7 @@ function adminMainKeyboard() {
   return ikb([
     [btn("📊 Статистика", "admin:stats"), btn("👥 Пользователи", "admin:users")],
     [btn("📦 Заказы", "admin:orders"), btn("💰 Кошельки", "admin:wallets")],
-    [btn("💵 Балансы", "admin:balances")],
+    [btn("💵 Балансы", "admin:balances"), btn("🧾 Пополнения", "admin:topups")],
     [btn("🎮 Каталог и цены", "admin:catalog"), btn("🎟 Промокоды", "admin:promos")],
     [btn("🤝 Рефералка", "admin:referral")],
     [btn("📢 Рассылка", "admin:broadcast"), btn("💳 Баланс Donix", "admin:donixbalance")],
@@ -2050,8 +2109,70 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     const text = res.ok ? `💳 Баланс Donix: ${JSON.stringify(res.data)}` : t(lang, "service_unavailable");
     await editMessage(env, chatId, messageId, text, ikb([[btn("⬅️", "admin:home")]]));
   } else if (a === "promos") {
-    await setState(db, userId, { step: "admin_create_promo", data: {} });
-    await editMessage(env, chatId, messageId, t(lang, "promo_admin_create_hint"), ikb([[btn("⬅️", "admin:home")]]));
+    await clearState(db, userId);
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      [
+        "🎟 Промокоды",
+        "",
+        "Промокод даёт покупателю скидку в процентах от суммы заказа (например, минус 15% при оплате).",
+        "",
+        "♾ Вечный — работает без срока действия, каждый аккаунт может использовать его только один раз.",
+        "📅 На 1 год — перестаёт работать через 1 год, каждый аккаунт может использовать его только один раз.",
+        "🛠 Вручную — гибкая настройка (свой лимит использований, минимальная сумма и т.д.).",
+      ].join("\n"),
+      ikb([
+        [btn("♾ Вечный промокод", "admin:promonew:forever")],
+        [btn("📅 Промокод на 1 год", "admin:promonew:year")],
+        [btn("🛠 Вручную", "admin:promonew:manual")],
+        [btn("📋 Список промокодов", "admin:promolist")],
+        [btn("⬅️", "admin:home")],
+      ])
+    );
+  } else if (a === "promonew") {
+    const mode = b; // "forever" | "year" | "manual"
+    if (mode === "manual") {
+      await setState(db, userId, { step: "admin_create_promo", data: {} });
+      await editMessage(env, chatId, messageId, t(lang, "promo_admin_create_hint"), ikb([[btn("⬅️", "admin:promos")]]));
+      return answerCallback(env, cq.id);
+    }
+    await setState(db, userId, { step: "admin_create_promo_guided", data: { mode } });
+    const durationLine = mode === "forever" ? "♾ Без срока действия (вечный)" : "📅 Действует 1 год с момента создания";
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      [
+        mode === "forever" ? "♾ Новый вечный промокод" : "📅 Новый промокод на 1 год",
+        "",
+        "Отправьте одним сообщением: КОД;ПРОЦЕНТ",
+        "Пример: SALE15;15  (код SALE15, скидка 15%)",
+        "",
+        "Условия:",
+        `• ${durationLine}`,
+        "• Каждый аккаунт может применить его только 1 раз",
+        "• Количество аккаунтов, которые могут его использовать — не ограничено",
+      ].join("\n"),
+      ikb([[btn("⬅️", "admin:promos")]])
+    );
+  } else if (a === "promolist") {
+    const promoKeys = await db.list({ prefix: "promo:" });
+    const lines = ["📋 Промокоды:"];
+    let count = 0;
+    for (const k of promoKeys.keys) {
+      if (k.name.startsWith("promouse:")) continue;
+      const p = await getJSON(db, k.name);
+      if (!p) continue;
+      count++;
+      const usesText = p.usesLeft === null ? "∞ (без ограничения)" : `осталось ${p.usesLeft}`;
+      const expText = p.expiresAt ? `до ${p.expiresAt.slice(0, 10)}` : "бессрочно";
+      const valText = p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
+      lines.push(`\n${p.active ? "🟢" : "🔴"} ${p.code} — ${valText}\nИспользований: ${usesText}${p.onePerUser ? " (1 на аккаунт)" : ""}\nСрок: ${expText}`);
+    }
+    if (count === 0) lines.push("Пока нет промокодов.");
+    await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:promos")]]));
   } else if (a === "catalog") {
     await clearState(db, userId);
     await editMessage(
@@ -2134,6 +2255,32 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     }
     if (users.length === 0) lines.push("Пока нет пользователей.");
     await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:home")]]));
+  } else if (a === "topups") {
+    const topupKeys = await db.list({ prefix: "topup:" });
+    const topups = [];
+    for (const k of topupKeys.keys) {
+      const tu = await getJSON(db, k.name);
+      if (tu) topups.push(tu);
+    }
+    topups.sort((x, y) => new Date(y.createdAt || 0) - new Date(x.createdAt || 0));
+    const recent = topups.slice(0, 15);
+    const statusLabel = { pending: "🟡 ожидает", confirmed: "🟢 зачислено", rejected: "🔴 отклонено" };
+    const lines = ["🧾 Пополнения баланса (последние):", ""];
+    const rows = [];
+    for (const tu of recent) {
+      const u = await getUser(db, tu.userId);
+      lines.push(
+        `ID: ${tu.topupId}\nUser: ${tu.userId} (@${u.username || "-"})\nСумма: ${tu.amount} сом — ${statusLabel[tu.status] || tu.status}${tu.transactionId ? `\nПлатёж: ${tu.transactionId}` : ""}`
+      );
+      lines.push("");
+      if (tu.status === "pending") {
+        rows.push([btn(`✅ ${tu.amount} сом — ${u.username || tu.userId}`, `admin:topupok:${tu.topupId}`), btn("❌", `admin:topupno:${tu.topupId}`)]);
+      }
+    }
+    if (recent.length === 0) lines.push("Пока нет заявок на пополнение.");
+    lines.push("Если статус «ожидает», а оплата по факту прошла — нажмите ✅, чтобы зачислить баланс вручную.");
+    rows.push([btn("⬅️", "admin:home")]);
+    await editMessage(env, chatId, messageId, lines.join("\n").trim(), ikb(rows));
   } else if (a === "balances") {
     await setState(db, userId, { step: "admin_balance_lookup", data: {} });
     await editMessage(env, chatId, messageId, "Введите Telegram ID пользователя:", ikb([[btn("⬅️", "admin:home")]]));
@@ -2274,6 +2421,45 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
     });
     await clearState(db, userId);
     await sendMessage(env, chatId, `✅ Промокод создан: ${promo.code}`, adminMainKeyboard());
+    return;
+  }
+
+  if (state.step === "admin_create_promo_guided") {
+    const mode = state.data.mode; // "forever" | "year"
+    const parts = text.split(";").map((p) => p.trim());
+    const code = parts[0];
+    const value = parseFloat((parts[1] || "").replace(",", "."));
+    if (!code || !Number.isFinite(value) || value <= 0 || value > 100) {
+      await sendMessage(
+        env,
+        chatId,
+        "Неверный формат. Отправьте: КОД;ПРОЦЕНТ\nПример: SALE15;15 (процент от 1 до 100)"
+      );
+      return;
+    }
+    const promo = await createPromo(db, {
+      code,
+      type: "percent",
+      value,
+      uses: null, // unlimited accounts can use it, each only once (onePerUser below)
+      days: mode === "year" ? 365 : null, // null = never expires ("вечный")
+      minSum: 0,
+      onePerUser: true,
+    });
+    await clearState(db, userId);
+    const durationText = mode === "year" ? "1 год" : "бессрочно (вечный)";
+    await sendMessage(
+      env,
+      chatId,
+      [
+        "✅ Промокод создан",
+        `Код: ${promo.code}`,
+        `Скидка: -${promo.value}% от суммы заказа`,
+        `Срок действия: ${durationText}`,
+        "Использование: по 1 разу на каждый аккаунт, число аккаунтов не ограничено",
+      ].join("\n"),
+      adminMainKeyboard()
+    );
     return;
   }
 
