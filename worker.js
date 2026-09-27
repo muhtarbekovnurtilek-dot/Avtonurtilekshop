@@ -122,10 +122,10 @@ async function verifyFinikWebhookSignature(env, request, rawBody, url) {
 const T = {
   ru: {
     main_menu: "Главное меню Nurtilek Shop 🛍",
-    btn_freefire: "🎮 Free Fire",
-    btn_pubg: "🎮 PUBG Mobile",
-    btn_mlbb: "🎮 Mobile Legends",
-    btn_tg: "📱 Telegram",
+    btn_freefire: "🔥 Free Fire",
+    btn_pubg: "🔫 PUBG Mobile",
+    btn_mlbb: "⚔️ Mobile Legends",
+    btn_tg: "⭐ Telegram",
     btn_games: "🎮 Игры и сервисы",
     btn_wallet: "💰 Кошелёк",
     btn_orders: "📦 Мои заказы",
@@ -160,6 +160,7 @@ const T = {
     enter_server_id_mlbb: "Введите Server ID:",
     enter_username_tg: "Введите @username:",
     enter_stars_amount: "Введите количество Stars (от 50 до 100000):",
+    stars_rate_line: (rate) => `Курс: ${rate} сом за 1 звезду ⭐`,
     validating: "⏳ Проверяю данные...",
     service_unavailable: "⚠️ Сервис временно недоступен. Попробуйте позже.",
     invalid_input: "❌ Неверные данные. Проверьте и попробуйте снова.",
@@ -184,6 +185,7 @@ const T = {
     promo_enter: "Введите промокод:",
     promo_applied: (d) => `Промокод применён. Скидка: ${d} сом`,
     promo_invalid: "❌ Промокод недействителен.",
+    promo_activated: "✅ Промокод активирован",
     promo_admin_create_hint:
       "Отправьте промокод в формате:\nCODE;TYPE;VALUE;USES;DAYS;MINSUM\nTYPE = percent или fixed\nПример: SALE10;percent;10;100;30;500",
     lang_choose: "Выберите язык:",
@@ -219,10 +221,10 @@ const T = {
   },
   kg: {
     main_menu: "Nurtilek Shop башкы менюсу 🛍",
-    btn_freefire: "🎮 Free Fire",
-    btn_pubg: "🎮 PUBG Mobile",
-    btn_mlbb: "🎮 Mobile Legends",
-    btn_tg: "📱 Telegram",
+    btn_freefire: "🔥 Free Fire",
+    btn_pubg: "🔫 PUBG Mobile",
+    btn_mlbb: "⚔️ Mobile Legends",
+    btn_tg: "⭐ Telegram",
     btn_games: "🎮 Оюндар жана кызматтар",
     btn_wallet: "💰 Капчык",
     btn_orders: "📦 Менин буйрутмаларым",
@@ -257,6 +259,7 @@ const T = {
     enter_server_id_mlbb: "Server ID киргизиңиз:",
     enter_username_tg: "@username киргизиңиз:",
     enter_stars_amount: "Stars санын киргизиңиз (50дөн 100000 чейин):",
+    stars_rate_line: (rate) => `Курс: ${rate} сом 1 жылдызга ⭐`,
     validating: "⏳ Текшерилүүдө...",
     service_unavailable: "⚠️ Кызмат убактылуу жеткиликсиз. Кийинчерээк аракет кылыңыз.",
     invalid_input: "❌ Туура эмес маалымат. Кайра аракет кылыңыз.",
@@ -281,6 +284,7 @@ const T = {
     promo_enter: "Промокодду киргизиңиз:",
     promo_applied: (d) => `Промокод колдонулду. Арзандатуу: ${d} сом`,
     promo_invalid: "❌ Промокод жараксыз.",
+    promo_activated: "✅ Промокод активтештирилди",
     promo_admin_create_hint:
       "Промокодду форматта жөнөтүңүз:\nCODE;TYPE;VALUE;USES;DAYS;MINSUM\nTYPE = percent же fixed\nМисал: SALE10;percent;10;100;30;500",
     lang_choose: "Тилди тандаңыз:",
@@ -472,6 +476,9 @@ function kvKeyPriceOverride(catKey, itemId) {
 }
 function kvKeyStarsPricePerStar() {
   return `config:tgstars_price_per_star`;
+}
+function kvKeyStarsPromptText() {
+  return `config:tgstars_prompt_text`;
 }
 function kvKeyActivePromo(userId) {
   return `activepromo:${userId}`;
@@ -1125,6 +1132,13 @@ async function getEffectiveStarsPricePerStar(db) {
   return CATALOG.tg_stars.pricePerStar;
 }
 
+/* Admin-editable wording shown above the "enter Stars amount" prompt; falls back to the
+   built-in translation if the admin hasn't set a custom text. */
+async function getEffectiveStarsPromptText(db, lang) {
+  const override = await db.get(kvKeyStarsPromptText());
+  return override || t(lang, "enter_stars_amount");
+}
+
 /* Returns an item with its price already resolved to the current (possibly admin-overridden) price. */
 async function findItem(db, catKey, itemId) {
   const base = findItemBase(catKey, itemId);
@@ -1744,7 +1758,10 @@ async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData
     `${stateData.itemName}`,
     `${t(lang, "price_label")}: ${price} ${t(lang, "kg_som")}`,
   ];
-  if (discount > 0) lines.push(`${t(lang, "discount_label")}: ${discount} ${t(lang, "kg_som")}`);
+  if (discount > 0) {
+    const discountPercent = price > 0 ? Math.round((discount / price) * 100) : 0;
+    lines.push(`${t(lang, "discount_label")}: ${discount} ${t(lang, "kg_som")} (-${discountPercent}%)`);
+  }
   lines.push(`${t(lang, "total_label")}: ${total} ${t(lang, "kg_som")}`);
   return { text: lines.join("\n"), total, discount, promoCode };
 }
@@ -1901,7 +1918,9 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     state.data = { username: text };
     state.step = "await_stars_amount";
     await setState(db, userId, state);
-    await sendMessage(env, chatId, t(lang, "enter_stars_amount"));
+    const pricePerStar = await getEffectiveStarsPricePerStar(db);
+    const promptText = await getEffectiveStarsPromptText(db, lang);
+    await sendMessage(env, chatId, `${t(lang, "stars_rate_line", pricePerStar)}\n${promptText}`);
     return;
   }
 
@@ -1946,7 +1965,16 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     // Stored separately from the step-machine state so it isn't lost when the
     // user goes on to browse categories/products before checking out.
     await db.put(kvKeyActivePromo(userId), text.toUpperCase());
-    await sendMessage(env, chatId, `✅ ${text.toUpperCase()}`, backHomeKeyboard(lang));
+    const valueLine =
+      check.promo.type === "percent"
+        ? `${t(lang, "discount_label")}: ${check.promo.value}%`
+        : `${t(lang, "discount_label")}: ${check.promo.value} ${t(lang, "kg_som")}`;
+    await sendMessage(
+      env,
+      chatId,
+      `${t(lang, "promo_activated")}\n${text.toUpperCase()}\n${valueLine}`,
+      backHomeKeyboard(lang)
+    );
     return;
   }
 
@@ -2049,10 +2077,14 @@ function adminCatalogListKeyboard() {
 async function adminCategoryItemsView(db, catKey) {
   if (catKey === "tg_stars") {
     const perStar = await getEffectiveStarsPricePerStar(db);
+    const promptText = await db.get(kvKeyStarsPromptText());
     return {
-      text: `💎 Telegram Stars\nТекущая цена за 1 звезду: ${perStar} сом\n\nМинимум: ${CATALOG.tg_stars.min}, максимум: ${CATALOG.tg_stars.max}.`,
+      text: `💎 Telegram Stars\nТекущий курс за 1 звезду: ${perStar} сом\nТекст запроса количества: ${
+        promptText || "(стандартный)"
+      }\n\nМинимум: ${CATALOG.tg_stars.min}, максимум: ${CATALOG.tg_stars.max}.`,
       keyboard: ikb([
-        [btn(`✏️ Изменить цену за звезду (${perStar})`, "admin:catitem:tg_stars:__perstar")],
+        [btn(`✏️ Изменить курс (${perStar})`, "admin:catitem:tg_stars:__perstar")],
+        [btn("✏️ Изменить текст запроса", "admin:catitem:tg_stars:__prompttext")],
         [btn("⬅️", "admin:catalog")],
       ]),
     };
@@ -2242,7 +2274,18 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
         env,
         chatId,
         messageId,
-        "Отправьте новую цену за 1 звезду (сом), например: 1.8",
+        "Отправьте новый курс за 1 звезду (сом), например: 1.8",
+        ikb([[btn("⬅️", "admin:catcat:tg_stars")]])
+      );
+      return answerCallback(env, cq.id);
+    }
+    if (catKey === "tg_stars" && itemId === "__prompttext") {
+      await setState(db, userId, { step: "admin_set_stars_text", data: {} });
+      await editMessage(
+        env,
+        chatId,
+        messageId,
+        "Отправьте новый текст запроса количества Stars (курс подставится отдельной строкой сверху автоматически).",
         ikb([[btn("⬅️", "admin:catcat:tg_stars")]])
       );
       return answerCallback(env, cq.id);
@@ -2585,7 +2628,14 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
     }
     await db.put(kvKeyStarsPricePerStar(), String(value));
     await clearState(db, userId);
-    await sendMessage(env, chatId, `✅ Новая цена за 1 звезду: ${value} сом.`, adminMainKeyboard());
+    await sendMessage(env, chatId, `✅ Новый курс за 1 звезду: ${value} сом.`, adminMainKeyboard());
+    return;
+  }
+
+  if (state.step === "admin_set_stars_text") {
+    await db.put(kvKeyStarsPromptText(), text);
+    await clearState(db, userId);
+    await sendMessage(env, chatId, "✅ Текст запроса количества Stars обновлён.", adminMainKeyboard());
     return;
   }
 
