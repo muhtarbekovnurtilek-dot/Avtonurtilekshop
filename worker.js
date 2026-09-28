@@ -712,8 +712,161 @@ async function donixProducts(env) {
   return donixRequest(env, "/products");
 }
 async function donixValidate(env, payload) {
-  // payload: { category, uid, server, username }
+  // payload: { sku, uid }
   return donixRequest(env, "/validate", "POST", payload);
+}
+
+/* ---- SKU resolution: bot items -> Donix SKUs, matched automatically from GET /products ---- */
+
+const DONIX_GAME_KEYWORDS = {
+  freefire: ["free fire", "freefire"],
+  pubg: ["pubg"],
+  mlbb: ["mobile legends", "mobile legend", "mlbb"],
+  tgstars: ["star", "звезд"],
+  tgpremium: ["premium", "премиум"],
+};
+const DONIX_DISTINCT_TOKENS = ["lite", "plus", "week", "month", "svp"];
+let donixProductsCache = { at: 0, list: null };
+
+function skuNorm(str) {
+  return String(str || "")
+    .toLowerCase()
+    .replace(/\+/g, " plus ")
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, " ")
+    .replace(/недел\S*|week\S*/g, " week ")
+    .replace(/месяц\S*|month\S*/g, " month ")
+    .replace(/алмаз\S*|diamond\S*|бриллиант\S*/g, " diamond ")
+    .replace(/ваучер\S*|voucher\S*|\bpass\b/g, " voucher ")
+    .replace(/[^a-z0-9а-яё]+/g, " ")
+    .trim();
+}
+function skuTokens(str) {
+  const all = skuNorm(str).split(" ").filter(Boolean);
+  return {
+    nums: all.filter((w) => /^\d+$/.test(w)),
+    words: all.filter((w) => !/^\d+$/.test(w) && w.length >= 3),
+  };
+}
+
+async function getDonixProducts(env) {
+  if (donixProductsCache.list && Date.now() - donixProductsCache.at < 5 * 60 * 1000) {
+    return donixProductsCache.list;
+  }
+  const res = await donixProducts(env);
+  if (!res.ok || !Array.isArray(res.data)) return donixProductsCache.list; // stale copy if any
+  donixProductsCache = { at: Date.now(), list: res.data };
+  return res.data;
+}
+
+function donixProductInGame(p, donixCategory) {
+  const kws = DONIX_GAME_KEYWORDS[donixCategory] || [];
+  const hay = skuNorm(`${p.game || ""} ${p.category || ""} ${p.name || ""}`);
+  return kws.some((k) => hay.includes(k));
+}
+
+function scoreDonixProduct(itemName, p) {
+  const item = skuTokens(itemName);
+  const prod = skuTokens(`${p.name || ""} ${p.sku || ""}`);
+  let score = 0;
+  if (item.nums.length && prod.nums.length) {
+    const hit = item.nums.filter((n) => prod.nums.includes(n)).length;
+    score += hit ? 10 * hit : -15;
+  }
+  for (const w of item.words) if (prod.words.includes(w)) score += 3;
+  for (const w of DONIX_DISTINCT_TOKENS) {
+    if (item.words.includes(w) !== prod.words.includes(w)) score -= 5;
+  }
+  return score;
+}
+
+/* Returns the Donix SKU for a bot item, or null. Priority: admin override (/setsku) ->
+   `sku` field in CATALOG -> automatic match against Donix /products. */
+async function resolveDonixSku(env, catKey, itemId, itemName) {
+  const db = env.DB;
+  const override = await db.get(`skuov:${itemId}`);
+  if (override) return override;
+  const cat = CATALOG[catKey];
+  if (!cat) return null;
+  const fixed = (cat.items || []).find((i) => i.id === itemId);
+  if (fixed && fixed.sku) return fixed.sku;
+
+  const products = await getDonixProducts(env);
+  if (!products) return null;
+  const inGame = products.filter((p) => donixProductInGame(p, cat.donixCategory));
+
+  if (catKey === "tg_stars") {
+    const m = /^stars_(\d+)$/.exec(itemId);
+    if (!m) return null;
+    const hit = inGame.find((p) => skuTokens(`${p.name} ${p.sku}`).nums.includes(m[1]));
+    return hit ? hit.sku : null;
+  }
+
+  let best = null;
+  let bestScore = 0;
+  for (const p of inGame) {
+    const sc = scoreDonixProduct(itemName, p);
+    if (sc > bestScore) {
+      best = p;
+      bestScore = sc;
+    }
+  }
+  return best && bestScore >= 3 ? best.sku : null;
+}
+
+/* ---- Price sync: Donix base price (GET /products) + markup % -> price overrides ---- */
+async function syncPricesFromDonix(env, markupPercent) {
+  const db = env.DB;
+  donixProductsCache = { at: 0, list: null };
+  const products = await getDonixProducts(env);
+  if (!products) return { ok: false, changed: 0, missing: [] };
+  const bySku = new Map(products.map((p) => [p.sku, p]));
+  const k = 1 + Number(markupPercent) / 100;
+  let changed = 0;
+  const missing = [];
+  for (const [catKey, cat] of Object.entries(CATALOG)) {
+    if (catKey === "tg_stars") {
+      const hit = products.find((p) => donixProductInGame(p, "tgstars"));
+      const base = hit ? Number(hit.price) : NaN;
+      if (Number.isFinite(base) && base > 0 && base < 20) {
+        await db.put(kvKeyStarsPricePerStar(), String(round2(base * k)));
+        changed++;
+      } else missing.push("Telegram Stars");
+      continue;
+    }
+    for (const item of cat.items) {
+      const sku = await resolveDonixSku(env, catKey, item.id, item.name);
+      const base = sku && bySku.has(sku) ? Number(bySku.get(sku).price) : NaN;
+      if (!Number.isFinite(base) || base <= 0) {
+        missing.push(item.id);
+        continue;
+      }
+      await setPriceOverride(db, catKey, item.id, Math.ceil(base * k));
+      changed++;
+    }
+  }
+  return { ok: true, changed, missing };
+}
+
+/* Game ID / target the way Donix expects it (the `uid` field). */
+function donixUidFromData(uidData) {
+  const d = uidData || {};
+  const raw = d.UID || d["Player ID"] || d.Username || "";
+  return String(raw).replace(/^@/, "").trim();
+}
+
+async function notifyAdminDonix(env, text) {
+  if (!env.ADMIN_ID) return;
+  try {
+    await sendMessage(env, env.ADMIN_ID, `⚠️ Donix: ${text}`.slice(0, 3900));
+  } catch (e) {
+    console.log("notifyAdminDonix error", String(e));
+  }
+}
+function donixErrText(result) {
+  if (!result) return "no response";
+  const d = result.data;
+  const msg = d && (d.error || d.message || d.code) ? String(d.error || d.message || d.code) : JSON.stringify(d);
+  return `HTTP ${result.status} ${msg || ""}`.trim();
 }
 async function donixCreateOrder(env, payload) {
   return donixRequest(env, "/order", "POST", payload);
@@ -1587,66 +1740,54 @@ async function processDonixOrder(env, db, order, lang, chatId) {
   const first = await idempotentOnce(db, "donixcreate", order.internalId);
   if (!first) return;
 
-  const cat = CATALOG[order.category];
-  const donixCategory = cat ? cat.donixCategory : order.category;
+  const uid = donixUidFromData(order.uidData);
+  const server = order.uidData && order.uidData["Server ID"] ? String(order.uidData["Server ID"]) : null;
 
-  // Cart orders bundle several distinct products together — Donix takes one product
-  // per order call, so create one call per cart line, each with its own external id.
+  const failOrder = async (reason) => {
+    order.status = "failed";
+    if (order.items) order.items.forEach((l) => (l.status = "failed"));
+    await saveOrder(db, order);
+    const refundOk = await idempotentOnce(db, "refund", order.internalId);
+    if (refundOk) await walletRelease(db, order.userId, order.total, `order_failed:${order.orderNumber}`);
+    await notifyAdminDonix(env, `заказ №${order.orderNumber} не создан. ${reason}`);
+    await sendMessage(env, chatId, t(lang, "failed"), backHomeKeyboard(lang));
+  };
+
+  // Cart orders: one Donix order per unit (the API has no quantity field).
   if (order.items && order.items.length > 0) {
-    const results = [];
+    const created = [];
     for (const line of order.items) {
-      const payload = {
-        external_id: `${order.internalId}::${line.itemId}`,
-        order_number: order.orderNumber,
-        category: donixCategory,
-        product_id: line.itemId,
-        quantity: line.qty,
-        target: order.uidData,
-      };
-      results.push(await donixCreateOrder(env, payload));
-    }
-
-    if (results.some((r) => !r.ok || !r.data)) {
-      order.status = "failed";
-      order.items.forEach((line) => (line.status = "failed"));
-      await saveOrder(db, order);
-      const refundOk = await idempotentOnce(db, "refund", order.internalId);
-      if (refundOk) await walletRelease(db, order.userId, order.total, `order_failed:${order.orderNumber}`);
-      await sendMessage(env, chatId, t(lang, "failed"), backHomeKeyboard(lang));
-      return;
-    }
-
-    order.items.forEach((line, idx) => {
-      line.donixOrderId = results[idx].data.id || results[idx].data.order_id || null;
+      const sku = await resolveDonixSku(env, order.category, line.itemId, line.name);
+      if (!sku) return failOrder(`не найден SKU для «${line.name}» (${line.itemId}). Используйте /setsku ${line.itemId} SKU`);
+      const qty = Math.max(1, line.qty || 1);
+      line.units = {};
+      for (let i = 1; i <= qty; i++) {
+        const externalId = qty > 1 ? `${order.internalId}::${line.itemId}#${i}` : `${order.internalId}::${line.itemId}`;
+        const payload = { external_id: externalId, sku, uid };
+        if (server) payload.server = server;
+        const r = await donixCreateOrder(env, payload);
+        if (!r.ok || !r.data) return failOrder(`${line.name}: ${donixErrText(r)}`);
+        line.units[String(i)] = "processing";
+        created.push(r.data.order_id || r.data.id || null);
+      }
+      line.donixOrderId = created[created.length - 1];
       line.status = "processing";
-    });
+    }
     order.status = "processing";
     await saveOrder(db, order);
     await sendMessage(env, chatId, t(lang, "processing"), backHomeKeyboard(lang));
     return;
   }
 
-  const payload = {
-    external_id: order.internalId,
-    order_number: order.orderNumber,
-    category: donixCategory,
-    product_id: order.itemId,
-    quantity: 1,
-    target: order.uidData,
-  };
+  const sku = await resolveDonixSku(env, order.category, order.itemId, order.itemName);
+  if (!sku) return failOrder(`не найден SKU для «${order.itemName}» (${order.itemId}). Используйте /setsku ${order.itemId} SKU`);
 
+  const payload = { external_id: order.internalId, sku, uid };
+  if (server) payload.server = server;
   const result = await donixCreateOrder(env, payload);
+  if (!result.ok || !result.data) return failOrder(donixErrText(result));
 
-  if (!result.ok || !result.data) {
-    order.status = "failed";
-    await saveOrder(db, order);
-    const refundOk = await idempotentOnce(db, "refund", order.internalId);
-    if (refundOk) await walletRelease(db, order.userId, order.total, `order_failed:${order.orderNumber}`);
-    await sendMessage(env, chatId, t(lang, "failed"), backHomeKeyboard(lang));
-    return;
-  }
-
-  order.donixOrderId = result.data.id || result.data.order_id || null;
+  order.donixOrderId = result.data.order_id || result.data.id || null;
   order.status = "processing";
   await saveOrder(db, order);
   await sendMessage(env, chatId, t(lang, "processing"), backHomeKeyboard(lang));
@@ -1657,8 +1798,11 @@ async function handleDonixStatusUpdate(env, db, externalId, status) {
   // Cart (multi-item) orders send one Donix order per line, tagged "<internalId>::<itemId>".
   let order = await getOrder(db, externalId);
   let cartLine = null;
+  let unitKey = null;
   if (!order && externalId.includes("::")) {
-    const [baseId, lineItemId] = externalId.split("::");
+    const [baseId, lineRef] = externalId.split("::");
+    const [lineItemId, unitPart] = lineRef.split("#");
+    unitKey = unitPart || null;
     order = await getOrder(db, baseId);
     if (order && order.items) cartLine = order.items.find((l) => l.itemId === lineItemId) || null;
   }
@@ -1672,7 +1816,7 @@ async function handleDonixStatusUpdate(env, db, externalId, status) {
   const lang = user.lang || "ru";
 
   if (cartLine) {
-    return handleCartLineStatusUpdate(env, db, order, cartLine, status, user, lang);
+    return handleCartLineStatusUpdate(env, db, order, cartLine, status, user, lang, unitKey);
   }
 
   if (status === "processing") {
@@ -1713,8 +1857,13 @@ async function handleDonixStatusUpdate(env, db, externalId, status) {
 /* Updates the status of a single cart line inside a multi-item order, refunds just that
    line's amount if it fails/gets refunded, and finalizes the order once every line has
    reached a terminal state (completed/failed/refunded). */
-async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user, lang) {
+async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user, lang, unitKey = null) {
+  // Refund share of one unit, respecting the promo discount applied to the whole order.
+  const factor = order.price > 0 ? order.total / order.price : 1;
+  const unitRefund = round2(cartLine.price * factor);
+
   if (status === "processing") {
+    if (unitKey && cartLine.units) cartLine.units[unitKey] = "processing";
     cartLine.status = "processing";
     if (order.status !== "processing" && order.status !== "completed" && order.status !== "failed") {
       order.status = "processing";
@@ -1724,11 +1873,24 @@ async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user
     return;
   }
 
-  if (status === "failed" || status === "refunded") {
+  if (unitKey && cartLine.units) {
+    cartLine.units[unitKey] = status;
+    if (status === "failed" || status === "refunded") {
+      const refundOk = await idempotentOnce(db, "refund", `${order.internalId}::${cartLine.itemId}#${unitKey}`);
+      if (refundOk) await walletRelease(db, order.userId, unitRefund, `donix_${status}:${order.orderNumber}:${cartLine.itemId}#${unitKey}`);
+    }
+    const states = Object.values(cartLine.units);
+    const terminal = ["completed", "failed", "refunded"];
+    if (states.every((x) => terminal.includes(x))) {
+      cartLine.status = states.some((x) => x !== "completed") ? "failed" : "completed";
+    } else {
+      cartLine.status = "processing";
+    }
+  } else if (status === "failed" || status === "refunded") {
     cartLine.status = status;
     const refundOk = await idempotentOnce(db, "refund", `${order.internalId}::${cartLine.itemId}`);
     if (refundOk) {
-      await walletRelease(db, order.userId, cartLine.price * cartLine.qty, `donix_${status}:${order.orderNumber}:${cartLine.itemId}`);
+      await walletRelease(db, order.userId, round2(cartLine.price * (cartLine.qty || 1) * factor), `donix_${status}:${order.orderNumber}:${cartLine.itemId}`);
     }
   } else if (status === "completed") {
     cartLine.status = "completed";
@@ -1804,6 +1966,51 @@ async function handleMessage(env, db, msg) {
   const userId = msg.from.id;
   const text = (msg.text || "").trim();
 
+  // Admin: /setsku ITEM_ID DONIX_SKU  (manual SKU override; "/setsku ITEM_ID -" removes it)
+  if (text.startsWith("/setsku") && isAdmin(env, userId)) {
+    const [, itemId, ...skuParts] = text.split(/\s+/);
+    const sku = skuParts.join(" ");
+    if (!itemId || !sku) {
+      await sendMessage(env, chatId, "Формат: /setsku ID_ТОВАРА SKU_DONIX\nНапример: /setsku ff_110 110-алмазов");
+      return;
+    }
+    if (sku === "-") {
+      await db.delete(`skuov:${itemId}`);
+      await sendMessage(env, chatId, `SKU для ${itemId} сброшен (будет подбираться автоматически).`);
+    } else {
+      await db.put(`skuov:${itemId}`, sku);
+      await sendMessage(env, chatId, `✅ ${itemId} → ${sku}`);
+    }
+    return;
+  }
+
+  // Admin: /syncprices [НАЦЕНКА_%]  (prices = Donix price + markup; markup is remembered)
+  if (text.startsWith("/syncprices") && isAdmin(env, userId)) {
+    const arg = text.split(/\s+/)[1];
+    if (arg !== undefined) {
+      const m = Number(arg.replace(",", "."));
+      if (!Number.isFinite(m) || m < 0 || m > 200) {
+        await sendMessage(env, chatId, "Формат: /syncprices 8  (наценка в процентах)");
+        return;
+      }
+      await db.put("config:markup_percent", String(m));
+    }
+    const markup = await db.get("config:markup_percent");
+    if (markup === null || markup === undefined) {
+      await sendMessage(env, chatId, "Укажите наценку: /syncprices 8");
+      return;
+    }
+    const r = await syncPricesFromDonix(env, markup);
+    await sendMessage(
+      env,
+      chatId,
+      r.ok
+        ? `✅ Цены обновлены (наценка ${markup}%): ${r.changed}` + (r.missing.length ? `\n❌ Не найдены: ${r.missing.join(", ")}` : "")
+        : "⚠️ Donix недоступен, цены не изменены."
+    );
+    return;
+  }
+
   const existingUserRecord = await getJSON(db, kvKeyUser(userId));
   const isNewUser = !existingUserRecord;
 
@@ -1857,8 +2064,14 @@ async function handleMessage(env, db, msg) {
     }
     await sendMessage(env, chatId, t(lang, "validating"));
     const cat = CATALOG[state.data.catKey];
-    const donixCategory = cat ? cat.donixCategory : "generic";
-    const validation = await donixValidate(env, { category: donixCategory, uid });
+    const sku = await resolveDonixSku(env, state.data.catKey, state.data.itemId, state.data.itemName);
+    if (!sku) {
+      await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
+      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+      await clearState(db, userId);
+      return;
+    }
+    const validation = await donixValidate(env, { sku, uid });
     if (!validation.ok) {
       await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
       await clearState(db, userId);
@@ -1868,7 +2081,7 @@ async function handleMessage(env, db, msg) {
       await sendMessage(env, chatId, t(lang, "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `cat:${state.data.catKey}`)]]));
       return;
     }
-    const uidData = { UID: uid, Nickname: validation.data.nickname || validation.data.name || "—" };
+    const uidData = { UID: uid, Nickname: validation.data.player_name || validation.data.nickname || validation.data.name || "—" };
     state.data.uidData = uidData;
     await setState(db, userId, state);
     const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, state.data, uidData);
@@ -1903,8 +2116,15 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
   if (state.step === "await_ml_server") {
     state.data.serverId = text;
     await sendMessage(env, chatId, t(lang, "validating"));
+    const mlSku = await resolveDonixSku(env, state.data.catKey, state.data.itemId, state.data.itemName);
+    if (!mlSku) {
+      await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
+      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+      await clearState(db, userId);
+      return;
+    }
     const validation = await donixValidate(env, {
-      category: "mlbb",
+      sku: mlSku,
       uid: state.data.playerId,
       server: state.data.serverId,
     });
@@ -1920,7 +2140,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     const uidData = {
       "Player ID": state.data.playerId,
       "Server ID": state.data.serverId,
-      Nickname: validation.data.nickname || "—",
+      Nickname: validation.data.player_name || validation.data.nickname || "—",
     };
     const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, state.data, uidData);
     const order = await createOrder(db, {
@@ -2086,6 +2306,7 @@ function adminMainKeyboard() {
     [btn("🎮 Каталог и цены", "admin:catalog"), btn("🎟 Промокоды", "admin:promos")],
     [btn("🤝 Рефералка", "admin:referral")],
     [btn("📢 Рассылка", "admin:broadcast"), btn("💳 Баланс Donix", "admin:donixbalance")],
+    [btn("🔗 SKU Donix", "admin:skus")],
     [btn("🛠 Настройки", "admin:settings"), btn("📋 Логи", "admin:logs")],
     [btn("🏠 Главное меню", "menu:home")],
   ]);
@@ -2169,6 +2390,40 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     await editMessage(env, chatId, messageId, text, ikb([[btn("⬅️", "admin:home")]]));
   } else if (a === "home") {
     await editMessage(env, chatId, messageId, t(lang, "admin_panel"), adminMainKeyboard());
+  } else if (a === "skus") {
+    donixProductsCache = { at: 0, list: null }; // force refresh
+    const products = await getDonixProducts(env);
+    if (!products) {
+      await editMessage(env, chatId, messageId, t(lang, "service_unavailable"), ikb([[btn("⬅️", "admin:home")]]));
+    } else {
+      const rows = [];
+      for (const [catKey, cat] of Object.entries(CATALOG)) {
+        if (catKey === "tg_stars") {
+          const hit = await resolveDonixSku(env, catKey, "stars_50", "50 Stars");
+          rows.push(`${hit ? "✅" : "❌"} ${cat.name} (звёзды) → ${hit || "нет товара"}`);
+          continue;
+        }
+        for (const item of cat.items) {
+          const sku = await resolveDonixSku(env, catKey, item.id, item.name);
+          rows.push(`${sku ? "✅" : "❌"} ${item.id} (${item.name}) → ${sku || "НЕ НАЙДЕН"}`);
+        }
+      }
+      const chunks = [];
+      let cur = "🔗 Привязка товаров к Donix SKU\n";
+      for (const r of rows) {
+        if ((cur + r).length > 3500) {
+          chunks.push(cur);
+          cur = "";
+        }
+        cur += r + "\n";
+      }
+      chunks.push(cur);
+      const list = "📦 Товары Donix:\n" + products.map((p) => `${p.sku} — ${p.name} — ${p.price}`).join("\n");
+      await editMessage(env, chatId, messageId, chunks[0], ikb([[btn("⬅️", "admin:home")]]));
+      for (const c of chunks.slice(1)) await sendMessage(env, chatId, c);
+      for (let i = 0; i < list.length; i += 3500) await sendMessage(env, chatId, list.slice(i, i + 3500));
+      await sendMessage(env, chatId, "Чтобы исправить ❌: /setsku ID_ТОВАРА SKU\nСбросить: /setsku ID_ТОВАРА -");
+    }
   } else if (a === "donixbalance") {
     const res = await donixBalance(env);
     const text = res.ok ? `💳 Баланс Donix: ${JSON.stringify(res.data)}` : t(lang, "service_unavailable");
@@ -2740,7 +2995,11 @@ async function verifyDonixSignature(env, request, rawBody) {
   );
   const sigBuffer = await crypto.subtle.sign("HMAC", key, enc.encode(rawBody));
   const computed = [...new Uint8Array(sigBuffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  const ok = computed === signature;
+  // Donix sends the header as "sha256=<hex>"
+  const received = signature.trim().replace(/^sha256=/i, "").toLowerCase();
+  let diff = computed.length ^ received.length;
+  for (let i = 0; i < computed.length; i++) diff |= computed.charCodeAt(i) ^ (received.charCodeAt(i) || 0);
+  const ok = diff === 0;
   return { ok, event: eventHeader };
 }
 
@@ -2910,5 +3169,18 @@ export default {
     }
 
     return new Response("not found", { status: 404 });
+  },
+
+  // Optional cron trigger: re-syncs prices daily once /syncprices N has been used at least once.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      (async () => {
+        const markup = await env.DB.get("config:markup_percent");
+        if (markup === null || markup === undefined) return;
+        const r = await syncPricesFromDonix(env, markup);
+        if (!r.ok) await notifyAdminDonix(env, "автообновление цен не удалось");
+        else if (r.missing.length) await notifyAdminDonix(env, `цены обновлены, не найдены: ${r.missing.join(", ")}`);
+      })()
+    );
   },
 };
