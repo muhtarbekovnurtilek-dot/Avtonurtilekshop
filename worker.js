@@ -459,6 +459,19 @@ function kvKeyUserOrders(userId) {
 function kvKeyIdemp(scope, key) {
   return `idemp:${scope}:${key}`;
 }
+/* Money helpers: amounts are kept with tyiyn (2 decimals), so 102 сом -15% = 86.70 сом. */
+function round2(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+function fmtSom(n) {
+  const v = round2(n);
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+function fmtPercent(n) {
+  const v = Math.round(Number(n) * 100) / 100;
+  return String(v);
+}
+
 function kvKeyPromo(code) {
   return `promo:${code.toUpperCase()}`;
 }
@@ -732,29 +745,32 @@ async function addWalletHistory(db, userId, entry) {
 }
 
 async function walletReserve(db, user, amount) {
-  if (user.balance < amount) return false;
-  user.balance -= amount;
+  amount = round2(amount);
+  if (round2(user.balance) < amount) return false;
+  user.balance = round2(user.balance - amount);
   await saveUser(db, user);
   return true;
 }
 
 async function walletRelease(db, userId, amount, reason) {
   const user = await getUser(db, userId);
-  user.balance += amount;
+  amount = round2(amount);
+  user.balance = round2(user.balance + amount);
   await saveUser(db, user);
   await addWalletHistory(db, userId, { type: "refund", amount, reason });
 }
 
 async function walletCommitSpend(db, userId, amount, orderNumber) {
   const user = await getUser(db, userId);
-  user.spent += amount;
+  amount = round2(amount);
+  user.spent = round2(user.spent + amount);
   await saveUser(db, user);
   await addWalletHistory(db, userId, { type: "purchase", amount, orderNumber });
 }
 
 async function walletTopUpCredit(db, userId, amount, note) {
   const user = await getUser(db, userId);
-  user.balance += amount;
+  user.balance = round2(user.balance + amount);
   await saveUser(db, user);
   await addWalletHistory(db, userId, { type: "topup", amount, note });
 }
@@ -833,8 +849,8 @@ async function validatePromo(db, code, userId, sum) {
     const orders = (await getJSON(db, kvKeyUserOrders(userId), [])) || [];
     if (orders.length > 0) return { ok: false, reason: "not_first_purchase" };
   }
-  let discount = promo.type === "percent" ? Math.floor((sum * promo.value) / 100) : promo.value;
-  if (discount > sum) discount = sum;
+  let discount = promo.type === "percent" ? round2((sum * promo.value) / 100) : round2(promo.value);
+  if (discount > sum) discount = round2(sum);
   return { ok: true, promo, discount };
 }
 
@@ -1335,7 +1351,7 @@ async function handleCallbackQuery(env, db, cq) {
           env,
           chatId,
           messageId,
-          `${t(lang, "insufficient_balance")}\n${t(lang, "wallet_balance")}: ${freshUser.balance} ${t(
+          `${t(lang, "insufficient_balance")}\n${t(lang, "wallet_balance")}: ${fmtSom(freshUser.balance)} ${t(
             lang,
             "kg_som"
           )}`,
@@ -1389,7 +1405,7 @@ async function handleCallbackQuery(env, db, cq) {
         const redirectUrl =
           botInfo.ok && botInfo.result.username ? `https://t.me/${botInfo.result.username}` : env.APP_BASE_URL;
         const payment = await createFinikPayment(env, {
-          amount: order.total,
+          amount: round2(order.total),
           paymentId: order.internalId,
           redirectUrl,
           description: `Nurtilek Shop order ${order.orderNumber}`,
@@ -1399,7 +1415,7 @@ async function handleCallbackQuery(env, db, cq) {
           await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
           return;
         }
-        await sendMessage(env, chatId, `№ ${order.orderNumber} — ${order.total} ${t(lang, "kg_som")}`, {
+        await sendMessage(env, chatId, `№ ${order.orderNumber} — ${fmtSom(order.total)} ${t(lang, "kg_som")}`, {
           inline_keyboard: [
             [{ text: "💳 Оплатить", url: payment.paymentUrl }],
             [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
@@ -1416,7 +1432,7 @@ async function handleCallbackQuery(env, db, cq) {
           `Здравствуйте! Хочу оформить заказ Nurtilek Shop.`,
           `Заказ: ${order.orderNumber}`,
           `Товар: ${order.itemName}`,
-          `Сумма: ${order.total} ${t(lang, "kg_som")}`,
+          `Сумма: ${fmtSom(order.total)} ${t(lang, "kg_som")}`,
           uidLines,
         ].join("\n");
 
@@ -1430,7 +1446,7 @@ async function handleCallbackQuery(env, db, cq) {
         await sendMessage(
           env,
           env.ADMIN_ID,
-          `🧾 Заказ ожидает оплаты через терминал\n№ ${order.orderNumber}\n${order.itemName}\nСумма: ${order.total} ${t(lang, "kg_som")}\nUser: ${userId} (@${user.username || "-"})\n${uidLines}`,
+          `🧾 Заказ ожидает оплаты через терминал\n№ ${order.orderNumber}\n${order.itemName}\nСумма: ${fmtSom(order.total)} ${t(lang, "kg_som")}\nUser: ${userId} (@${user.username || "-"})\n${uidLines}`,
           ikb([[btn("✅ Оплата получена", `admin:orderpayok:${order.internalId}`)]])
         );
         return;
@@ -1441,7 +1457,7 @@ async function handleCallbackQuery(env, db, cq) {
     if (ns === "wallet") {
       if (a === "home") {
         const u = await getUser(db, userId);
-        const text = `${t(lang, "wallet_title")}\n${t(lang, "wallet_balance")}: ${u.balance} ${t(lang, "kg_som")}`;
+        const text = `${t(lang, "wallet_title")}\n${t(lang, "wallet_balance")}: ${fmtSom(u.balance)} ${t(lang, "kg_som")}`;
         await editMessage(env, chatId, messageId, text, walletKeyboard(lang));
       } else if (a === "topup") {
         await setState(db, userId, { step: "await_topup_amount", data: {} });
@@ -1456,7 +1472,7 @@ async function handleCallbackQuery(env, db, cq) {
             .slice(0, 15)
             .map((h) => {
               const sign = h.type === "topup" || h.type === "refund" || h.type === "referral" ? "+" : "−";
-              return `${h.at.slice(0, 10)} — ${walletHistoryTypeLabel(lang, h.type)} — ${sign}${h.amount} ${t(lang, "kg_som")}`;
+              return `${h.at.slice(0, 10)} — ${walletHistoryTypeLabel(lang, h.type)} — ${sign}${fmtSom(h.amount)} ${t(lang, "kg_som")}`;
             })
             .join("\n");
           await editMessage(env, chatId, messageId, lines, walletKeyboard(lang));
@@ -1471,8 +1487,8 @@ async function handleCallbackQuery(env, db, cq) {
         t(lang, "profile_title"),
         `${t(lang, "profile_username")}: @${u.username || "—"}`,
         `${t(lang, "profile_id")}: ${u.id}`,
-        `${t(lang, "profile_balance")}: ${u.balance} ${t(lang, "kg_som")}`,
-        `${t(lang, "profile_spent")}: ${u.spent} ${t(lang, "kg_som")}`,
+        `${t(lang, "profile_balance")}: ${fmtSom(u.balance)} ${t(lang, "kg_som")}`,
+        `${t(lang, "profile_spent")}: ${fmtSom(u.spent)} ${t(lang, "kg_som")}`,
       ].join("\n");
       await editMessage(env, chatId, messageId, text, profileKeyboard(lang));
       return answerCallback(env, cq.id);
@@ -1513,7 +1529,7 @@ async function handleCallbackQuery(env, db, cq) {
           const o = await getOrder(db, id);
           if (!o) continue;
           lines.push(`№ ${o.orderNumber}`);
-          lines.push(`${o.itemName} — ${o.total} ${t(lang, "kg_som")}`);
+          lines.push(`${o.itemName} — ${fmtSom(o.total)} ${t(lang, "kg_som")}`);
           lines.push(orderStatusLabel(lang, o.status));
           lines.push("");
         }
@@ -1748,21 +1764,27 @@ async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData
     if (check.ok) {
       discount = check.discount;
       promoCode = activeCode;
+      promoInfo = check.promo;
     }
   }
-  const total = price - discount;
+  const total = round2(price - discount);
+  let promoInfo = null;
   const lines = [
     Object.entries(uidData)
       .map(([k, v]) => `${k}: ${v}`)
       .join("\n"),
     `${stateData.itemName}`,
-    `${t(lang, "price_label")}: ${price} ${t(lang, "kg_som")}`,
+    `${t(lang, "price_label")}: ${fmtSom(price)} ${t(lang, "kg_som")}`,
   ];
   if (discount > 0) {
-    const discountPercent = price > 0 ? Math.round((discount / price) * 100) : 0;
-    lines.push(`${t(lang, "discount_label")}: ${discount} ${t(lang, "kg_som")} (-${discountPercent}%)`);
+    // Show the promo's real percent (e.g. 8.5%), not a rounded value derived from the discount.
+    const discountPercent =
+      promoInfo && promoInfo.type === "percent"
+        ? fmtPercent(promoInfo.value)
+        : fmtPercent(price > 0 ? (discount / price) * 100 : 0);
+    lines.push(`${t(lang, "discount_label")}: ${fmtSom(discount)} ${t(lang, "kg_som")} (-${discountPercent}%)`);
   }
-  lines.push(`${t(lang, "total_label")}: ${total} ${t(lang, "kg_som")}`);
+  lines.push(`${t(lang, "total_label")}: ${fmtSom(total)} ${t(lang, "kg_som")}`);
   return { text: lines.join("\n"), total, discount, promoCode };
 }
 
@@ -1932,7 +1954,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       return;
     }
     const pricePerStar = await getEffectiveStarsPricePerStar(db);
-    const price = Math.round(amount * pricePerStar);
+    const price = round2(amount * pricePerStar);
     const uidData = { Username: state.data.username, Stars: amount };
     const stateData = { catKey: "tg_stars", itemId: `stars_${amount}`, itemName: `${amount} Stars`, price };
     const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData);
@@ -1967,8 +1989,8 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     await db.put(kvKeyActivePromo(userId), text.toUpperCase());
     const valueLine =
       check.promo.type === "percent"
-        ? `${t(lang, "discount_label")}: ${check.promo.value}%`
-        : `${t(lang, "discount_label")}: ${check.promo.value} ${t(lang, "kg_som")}`;
+        ? `${t(lang, "discount_label")}: ${fmtPercent(check.promo.value)}%`
+        : `${t(lang, "discount_label")}: ${fmtSom(check.promo.value)} ${t(lang, "kg_som")}`;
     await sendMessage(
       env,
       chatId,
@@ -2123,7 +2145,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       const o = await getJSON(db, k.name);
       if (o && (o.status === "paid" || o.status === "processing" || o.status === "completed")) {
         completed++;
-        totalRevenue += o.total || 0;
+        totalRevenue = round2(totalRevenue + (o.total || 0));
       }
     }
     const text = [
@@ -2131,7 +2153,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       `Всего пользователей: ${userKeys.keys.length}`,
       `Всего заказов: ${orderKeys.keys.length}`,
       `Оплаченных заказов: ${completed}`,
-      `Общая сумма оплаченных заказов: ${totalRevenue} сом`,
+      `Общая сумма оплаченных заказов: ${fmtSom(totalRevenue)} сом`,
     ].join("\n");
     await editMessage(env, chatId, messageId, text, ikb([[btn("⬅️", "admin:home")]]));
   } else if (a === "home") {
@@ -2313,7 +2335,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     const lines = ["📦 Последние заказы:"];
     for (const k of recent) {
       const o = await getJSON(db, k.name);
-      if (o) lines.push(`№ ${o.orderNumber} — ${o.itemName} — ${o.total} сом — ${o.status}`);
+      if (o) lines.push(`№ ${o.orderNumber} — ${o.itemName} — ${fmtSom(o.total)} сом — ${o.status}`);
     }
     if (recent.length === 0) lines.push("Пока нет заказов.");
     await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:home")]]));
@@ -2499,7 +2521,7 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
     const promo = await createPromo(db, {
       code,
       type,
-      value,
+      value: String(value).replace(",", "."),
       uses: uses || 100,
       days: days || 30,
       minSum: minSum || 0,
