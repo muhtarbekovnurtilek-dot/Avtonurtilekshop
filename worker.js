@@ -422,7 +422,7 @@ const CATALOG = {
     name: "Telegram Stars",
     inputType: "tg_username",
     donixCategory: "tgstars",
-    pricePerStar: 1.8,
+    pricePerStar: 1.7,
     min: 50,
     max: 100000,
     items: [],
@@ -1155,6 +1155,16 @@ async function getEffectiveStarsPromptText(db, lang) {
   return override || t(lang, "enter_stars_amount");
 }
 
+/* Rate + a few sample totals, so the price is visible on every Stars screen. */
+async function starsPriceInfo(db, lang) {
+  const rate = await getEffectiveStarsPricePerStar(db);
+  const cat = CATALOG.tg_stars;
+  const samples = [50, 100, 500, 1000]
+    .filter((n) => n >= cat.min && n <= cat.max)
+    .map((n) => `⭐ ${n} = ${fmtSom(round2(n * rate))} ${t(lang, "kg_som")}`);
+  return [t(lang, "stars_rate_line", fmtSom(rate)), ...samples].join("\n");
+}
+
 /* Returns an item with its price already resolved to the current (possibly admin-overridden) price. */
 async function findItem(db, catKey, itemId) {
   const base = findItemBase(catKey, itemId);
@@ -1228,7 +1238,8 @@ async function handleCallbackQuery(env, db, cq) {
       const catKey = a;
       if (catKey === "tg_stars") {
         await setState(db, userId, { step: "await_stars_username", data: {} });
-        await editMessage(env, chatId, messageId, t(lang, "enter_username_tg"), backHomeKeyboard(lang));
+        const starsInfo = await starsPriceInfo(db, lang);
+        await editMessage(env, chatId, messageId, `${starsInfo}\n\n${t(lang, "enter_username_tg")}`, backHomeKeyboard(lang));
         return answerCallback(env, cq.id);
       }
       let cart = await getCart(db, userId);
@@ -1940,9 +1951,9 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     state.data = { username: text };
     state.step = "await_stars_amount";
     await setState(db, userId, state);
-    const pricePerStar = await getEffectiveStarsPricePerStar(db);
+    const starsInfo = await starsPriceInfo(db, lang);
     const promptText = await getEffectiveStarsPromptText(db, lang);
-    await sendMessage(env, chatId, `${t(lang, "stars_rate_line", pricePerStar)}\n${promptText}`);
+    await sendMessage(env, chatId, `${starsInfo}\n\n${promptText}`);
     return;
   }
 
