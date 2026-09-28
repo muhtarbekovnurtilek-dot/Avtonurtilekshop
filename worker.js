@@ -1767,6 +1767,7 @@ async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData
   const price = stateData.price;
   let discount = 0;
   let promoCode = null;
+  let promoInfo = null;
   // The active promo code is kept in its own KV key (not in the step-machine state),
   // so it survives moving between menus/categories while the user picks a product.
   const activeCode = await db.get(kvKeyActivePromo(userId));
@@ -1779,7 +1780,6 @@ async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData
     }
   }
   const total = round2(price - discount);
-  let promoInfo = null;
   const lines = [
     Object.entries(uidData)
       .map(([k, v]) => `${k}: ${v}`)
