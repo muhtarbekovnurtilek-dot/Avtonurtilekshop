@@ -670,6 +670,15 @@ async function editMessage(env, chatId, messageId, text, replyMarkup) {
   return res;
 }
 
+async function deleteMessage(env, chatId, messageId) {
+  if (!messageId) return;
+  try {
+    await tgCall(env, "deleteMessage", { chat_id: chatId, message_id: messageId });
+  } catch (e) {
+    console.log("deleteMessage failed", e);
+  }
+}
+
 async function answerCallback(env, callbackQueryId, text, showAlert = false) {
   return tgCall(env, "answerCallbackQuery", {
     callback_query_id: callbackQueryId,
@@ -1754,6 +1763,23 @@ async function handleCallbackQuery(env, db, cq) {
 }
 
 
+/* Final "чек": заказ выполнен + номер, ID, ник, товар. Остаётся в чате, а главное меню открывается ниже. */
+async function sendCompletedReceipt(env, userId, lang, order) {
+  const uidLines = Object.entries(order.uidData || {}).map(([k, v]) => `${k}: ${v}`);
+  const receiptText = [
+    t(lang, "completed"),
+    `№ ${order.orderNumber}`,
+    ...uidLines,
+    order.itemName,
+    "",
+    t(lang, "order_completed_review_hint"),
+  ].join("\n");
+  await sendMessage(env, userId, receiptText, {
+    inline_keyboard: [[{ text: t(lang, "btn_leave_review"), url: "https://t.me/nurtilekshop" }]],
+  });
+  await sendMessage(env, userId, t(lang, "main_menu"), mainMenuKeyboard(lang));
+}
+
 /* ================= DONIX ORDER PROCESSING ================= */
 
 async function processDonixOrder(env, db, order, lang, chatId) {
@@ -1795,7 +1821,6 @@ async function processDonixOrder(env, db, order, lang, chatId) {
     }
     order.status = "processing";
     await saveOrder(db, order);
-    await sendMessage(env, chatId, t(lang, "processing"), backHomeKeyboard(lang));
     return;
   }
 
@@ -1810,7 +1835,6 @@ async function processDonixOrder(env, db, order, lang, chatId) {
   order.donixOrderId = result.data.order_id || result.data.id || null;
   order.status = "processing";
   await saveOrder(db, order);
-  await sendMessage(env, chatId, t(lang, "processing"), backHomeKeyboard(lang));
 }
 
 /* called from /donix-webhook when a status update arrives */
@@ -1842,23 +1866,10 @@ async function handleDonixStatusUpdate(env, db, externalId, status) {
   if (status === "processing") {
     order.status = "processing";
     await saveOrder(db, order);
-    await sendMessage(env, user.id, t(lang, "processing"), backHomeKeyboard(lang));
   } else if (status === "completed") {
     order.status = "completed";
     await saveOrder(db, order);
-    const completedText = [
-      t(lang, "completed"),
-      `№ ${order.orderNumber}`,
-      order.itemName,
-      "",
-      t(lang, "order_completed_review_hint"),
-    ].join("\n");
-    await sendMessage(env, user.id, completedText, {
-      inline_keyboard: [
-        [{ text: t(lang, "btn_leave_review"), url: "https://t.me/nurtilekshop" }],
-        [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
-      ],
-    });
+    await sendCompletedReceipt(env, user.id, lang, order);
   } else if (status === "failed") {
     order.status = "failed";
     await saveOrder(db, order);
@@ -1887,7 +1898,6 @@ async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user
     cartLine.status = "processing";
     if (order.status !== "processing" && order.status !== "completed" && order.status !== "failed") {
       order.status = "processing";
-      await sendMessage(env, user.id, t(lang, "processing"), backHomeKeyboard(lang));
     }
     await saveOrder(db, order);
     return;
@@ -1922,19 +1932,7 @@ async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user
     order.status = anyIssue ? "failed" : "completed";
     await saveOrder(db, order);
     if (order.status === "completed") {
-      const completedText = [
-        t(lang, "completed"),
-        `№ ${order.orderNumber}`,
-        order.itemName,
-        "",
-        t(lang, "order_completed_review_hint"),
-      ].join("\n");
-      await sendMessage(env, user.id, completedText, {
-        inline_keyboard: [
-          [{ text: t(lang, "btn_leave_review"), url: "https://t.me/nurtilekshop" }],
-          [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
-        ],
-      });
+      await sendCompletedReceipt(env, user.id, lang, order);
     } else {
       await sendMessage(env, user.id, t(lang, "failed"), backHomeKeyboard(lang));
     }
@@ -2082,16 +2080,19 @@ async function handleMessage(env, db, msg) {
       await sendMessage(env, chatId, t(lang, "invalid_input"));
       return;
     }
-    await sendMessage(env, chatId, t(lang, "validating"));
+    const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
+    const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
     const cat = CATALOG[state.data.catKey];
     const sku = await resolveDonixSku(env, state.data.catKey, state.data.itemId, state.data.itemName);
     if (!sku) {
+      await dropValidating();
       await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
       await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
       await clearState(db, userId);
       return;
     }
     const validation = await donixValidate(env, { sku, uid });
+    await dropValidating();
     if (!validation.ok) {
       await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
       await clearState(db, userId);
@@ -2135,9 +2136,11 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
 
   if (state.step === "await_ml_server") {
     state.data.serverId = text;
-    await sendMessage(env, chatId, t(lang, "validating"));
+    const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
+    const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
     const mlSku = await resolveDonixSku(env, state.data.catKey, state.data.itemId, state.data.itemName);
     if (!mlSku) {
+      await dropValidating();
       await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
       await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
       await clearState(db, userId);
@@ -2148,6 +2151,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       uid: state.data.playerId,
       server: state.data.serverId,
     });
+    await dropValidating();
     if (!validation.ok) {
       await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
       await clearState(db, userId);
