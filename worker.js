@@ -2081,7 +2081,7 @@ async function handleMessage(env, db, msg) {
       await sendMessage(env, chatId, t(lang, "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `cat:${state.data.catKey}`)]]));
       return;
     }
-    const uidData = { UID: uid, Nickname: validation.data.player_name || validation.data.nickname || validation.data.name || "—" };
+    const uidData = { UID: uid, "Ник": validation.data.player_name || validation.data.nickname || validation.data.name || "—" };
     state.data.uidData = uidData;
     await setState(db, userId, state);
     const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, state.data, uidData);
@@ -2140,7 +2140,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     const uidData = {
       "Player ID": state.data.playerId,
       "Server ID": state.data.serverId,
-      Nickname: validation.data.player_name || validation.data.nickname || "—",
+      "Ник": validation.data.player_name || validation.data.nickname || "—",
     };
     const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, state.data, uidData);
     const order = await createOrder(db, {
