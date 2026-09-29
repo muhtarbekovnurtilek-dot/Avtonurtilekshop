@@ -200,9 +200,10 @@ const T = {
     kg_som: "сом",
     btn_referral: "🤝 Рефералка",
     btn_pay_balance: "💰 С баланса",
-    btn_pay_bank: "🏦 Банк",
+    btn_pay_bank: "🏦 Банк (MBank, О!Деньги и др.)",
     btn_pay_terminal: "🧾 Терминал",
     choose_payment_method: "Выберите способ оплаты:",
+    bank_pay_hint: "Нажмите «Оплатить» — откроется страница для оплаты картой или через приложение банка (MBank, О!Деньги, Bakai24, Элсом, Optima Bank и другие).",
     terminal_instructions:
       "Нажмите кнопку ниже — откроется личный чат с администратором с уже готовым текстом. Просто отправьте его и приложите чек об оплате.",
     terminal_dm_button: "📩 Написать администратору",
@@ -299,9 +300,10 @@ const T = {
     kg_som: "сом",
     btn_referral: "🤝 Рефералка",
     btn_pay_balance: "💰 Баланстан",
-    btn_pay_bank: "🏦 Банк",
+    btn_pay_bank: "🏦 Банк (MBank, О!Деньги ж.б.)",
     btn_pay_terminal: "🧾 Терминал",
     choose_payment_method: "Төлөм ыкмасын тандаңыз:",
+    bank_pay_hint: "«Төлөө» баскычын басыңыз — карта менен же банк колдонмосу аркылуу төлөө барагы ачылат (MBank, О!Деньги, Bakai24, Элсом, Optima Bank ж.б.).",
     terminal_instructions:
       "Төмөнкү баскычты басыңыз — администратор менен даяр текст менен жеке чат ачылат. Аны жөнөтүп, төлөм чегин тиркеңиз.",
     terminal_dm_button: "📩 Администраторго жазуу",
@@ -424,7 +426,7 @@ const CATALOG = {
     donixCategory: "tgstars",
     pricePerStar: 1.7,
     min: 50,
-    max: 100000,
+    max: 2500, // Donix /order has no quantity field: 1 order per star is sent, so this must stay small
     items: [],
   },
   tg_premium: {
@@ -795,9 +797,8 @@ async function resolveDonixSku(env, catKey, itemId, itemName) {
   const inGame = products.filter((p) => donixProductInGame(p, cat.donixCategory));
 
   if (catKey === "tg_stars") {
-    const m = /^stars_(\d+)$/.exec(itemId);
-    if (!m) return null;
-    const hit = inGame.find((p) => skuTokens(`${p.name} ${p.sku}`).nums.includes(m[1]));
+    // Donix sells Stars as one flat-rate SKU (telegram-stars-base), not per amount.
+    const hit = inGame.find((p) => p.sku === "telegram-stars-base") || inGame[0];
     return hit ? hit.sku : null;
   }
 
@@ -1576,15 +1577,34 @@ async function handleCallbackQuery(env, db, cq) {
           lang,
         });
         if (!payment.ok) {
-          await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+          await editMessage(env, chatId, messageId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
           return;
         }
-        await sendMessage(env, chatId, `№ ${order.orderNumber} — ${fmtSom(order.total)} ${t(lang, "kg_som")}`, {
+        // Same message, just swap the buttons — no extra message stacking underneath.
+        await editMessage(
+          env,
+          chatId,
+          messageId,
+          `№ ${order.orderNumber} — ${fmtSom(order.total)} ${t(lang, "kg_som")}\n\n${t(lang, "bank_pay_hint")}`,
+          {
           inline_keyboard: [
             [{ text: "💳 Оплатить", url: payment.paymentUrl }],
-            [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
+            [{ text: t(lang, "btn_back"), callback_data: `payorder:back:${orderId}` }],
           ],
-        });
+          }
+        );
+        return;
+      }
+
+      if (method === "back") {
+        // Return to the payment-method picker on the very same message.
+        await editMessage(
+          env,
+          chatId,
+          messageId,
+          `№ ${order.orderNumber} — ${order.itemName}\n${t(lang, "total_label")}: ${fmtSom(order.total)} ${t(lang, "kg_som")}\n\n${t(lang, "choose_payment_method")}`,
+          paymentMethodKeyboard(lang, orderId)
+        );
         return;
       }
 
@@ -2187,7 +2207,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     const pricePerStar = await getEffectiveStarsPricePerStar(db);
     const price = round2(amount * pricePerStar);
     const uidData = { Username: state.data.username, Stars: amount };
-    const stateData = { catKey: "tg_stars", itemId: `stars_${amount}`, itemName: `${amount} Stars`, price };
+    const stateData = { catKey: "tg_stars", itemId: `stars_${amount}`, itemName: `${amount} ⭐ Stars`, price };
     const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData);
     const order = await createOrder(db, {
       userId,
@@ -2199,6 +2219,9 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       total: prompt.total,
       uidData,
       promoCode: prompt.promoCode,
+      // Donix /order has no quantity field, so Stars are fulfilled as `amount` separate
+      // 1-star Donix orders, reusing the same per-unit cart mechanism as other games.
+      items: [{ itemId: "star_unit", name: "1 ⭐ Star", qty: amount, price: pricePerStar }],
     });
     await clearState(db, userId);
     await sendMessage(env, chatId, `№ ${order.orderNumber}
