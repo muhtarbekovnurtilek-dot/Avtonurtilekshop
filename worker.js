@@ -2126,11 +2126,52 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     return;
   }
 
+  // Mobile Legends: first try to find the player by Player ID alone. If Donix returns a
+  // nickname, the Server ID is not asked. Otherwise fall back to asking for the Server ID.
   if (state.step === "await_ml_player") {
     state.data.playerId = text;
-    state.step = "await_ml_server";
-    await setState(db, userId, state);
-    await sendMessage(env, chatId, t(lang, "enter_server_id_mlbb"));
+    const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
+    const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
+    const mlSku = await resolveDonixSku(env, state.data.catKey, state.data.itemId, state.data.itemName);
+    if (!mlSku) {
+      await dropValidating();
+      await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
+      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+      await clearState(db, userId);
+      return;
+    }
+    const validation = await donixValidate(env, { sku: mlSku, uid: state.data.playerId });
+    await dropValidating();
+    const foundNick =
+      validation.ok && validation.data && validation.data.valid !== false
+        ? validation.data.player_name || validation.data.nickname || validation.data.name || null
+        : null;
+    if (!foundNick) {
+      // not found without a server -> ask for the Server ID
+      state.step = "await_ml_server";
+      await setState(db, userId, state);
+      await sendMessage(env, chatId, t(lang, "enter_server_id_mlbb"));
+      return;
+    }
+    const uidData = { "Player ID": state.data.playerId, "Ник": foundNick };
+    const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, state.data, uidData);
+    const order = await createOrder(db, {
+      userId,
+      category: state.data.catKey,
+      itemId: state.data.itemId,
+      itemName: state.data.itemName,
+      price: state.data.price,
+      discount: prompt.discount,
+      total: prompt.total,
+      uidData,
+      promoCode: prompt.promoCode,
+      items: state.data.items,
+    });
+    await clearState(db, userId);
+    await sendMessage(env, chatId, `№ ${order.orderNumber}
+${prompt.text}
+
+${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
     return;
   }
 
