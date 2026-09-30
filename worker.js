@@ -1545,6 +1545,8 @@ async function handleCallbackQuery(env, db, cq) {
         `${t(lang, "order_created", order.orderNumber)}\n${t(lang, "processing")}`,
         backHomeKeyboard(lang)
       );
+      order.processingMsg = { chatId, messageId };
+      await saveOrder(db, order);
       await answerCallback(env, cq.id);
 
       // fire off donix order creation (do not block callback ack)
@@ -1765,6 +1767,10 @@ async function handleCallbackQuery(env, db, cq) {
 
 /* Final "чек": заказ выполнен + номер, ID, ник, товар. Остаётся в чате, а главное меню открывается ниже. */
 async function sendCompletedReceipt(env, userId, lang, order) {
+  // Remove the "Заказ создан / обрабатывается" message so only the receipt stays.
+  if (order.processingMsg && order.processingMsg.messageId) {
+    await deleteMessage(env, order.processingMsg.chatId || userId, order.processingMsg.messageId);
+  }
   const uidLines = Object.entries(order.uidData || {}).map(([k, v]) => `${k}: ${v}`);
   const receiptText = [
     t(lang, "completed"),
@@ -2799,12 +2805,16 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
 
     const buyer = await getUser(db, order.userId);
     const buyerLang = buyer.lang || "ru";
-    await sendMessage(
+    const procRes = await sendMessage(
       env,
       order.userId,
       `${t(buyerLang, "order_created", order.orderNumber)}\n${t(buyerLang, "processing")}`,
       backHomeKeyboard(buyerLang)
     );
+    if (procRes && procRes.ok && procRes.result) {
+      order.processingMsg = { chatId: order.userId, messageId: procRes.result.message_id };
+      await saveOrder(db, order);
+    }
     await editMessage(env, chatId, messageId, `✅ Оплата по заказу ${order.orderNumber} подтверждена.`, null);
     await processDonixOrder(env, db, order, buyerLang, order.userId);
   } else if (a === "referral") {
@@ -3089,26 +3099,24 @@ async function verifyDonixSignature(env, request, rawBody) {
   return { ok: false, event: eventHeader, reason: "signature mismatch (wrong DONIX_WEBHOOK_SECRET?)" };
 }
 
-/* Maps whatever Donix calls a status to the four we handle. */
+/* Only the statuses Donix documents are accepted; anything else is ignored (never guessed). */
+const DONIX_KNOWN_STATUSES = ["processing", "completed", "failed", "refunded"];
 function normalizeDonixStatus(raw) {
-  const s = String(raw || "").toLowerCase().trim();
-  if (["completed", "complete", "done", "success", "succeeded", "delivered", "fulfilled"].includes(s)) return "completed";
-  if (["failed", "fail", "error", "cancelled", "canceled", "rejected"].includes(s)) return "failed";
-  if (["refunded", "refund"].includes(s)) return "refunded";
-  if (["processing", "pending", "in_progress", "created", "new"].includes(s)) return "processing";
-  return s;
+  return String(raw || "").toLowerCase().trim();
 }
 
 function extractDonixOrderInfo(payload) {
   const p = payload || {};
-  const nested = [p, p.order, p.data, p.data && p.data.order].filter(Boolean);
+  // Most specific first, so an API-level "status":"success" wrapper is never mistaken for the order status.
+  const nested = [p.data && p.data.order, p.order, p.data, p].filter(Boolean);
   let externalId = null;
   let status = null;
   for (const o of nested) {
     externalId = externalId || o.external_id || o.externalId || null;
-    status = status || o.status || null;
+    const st = normalizeDonixStatus(o.status);
+    if (!status && DONIX_KNOWN_STATUSES.includes(st)) status = st;
   }
-  return { externalId, status: normalizeDonixStatus(status) };
+  return { externalId, status };
 }
 
 /* ================= ROUTE HANDLERS ================= */
@@ -3254,12 +3262,16 @@ async function routePaymentWebhook(env, db, request) {
 
     const buyer = await getUser(db, order.userId);
     const buyerLang = buyer.lang || "ru";
-    await sendMessage(
+    const procRes = await sendMessage(
       env,
       order.userId,
       `${t(buyerLang, "order_created", order.orderNumber)}\n${t(buyerLang, "processing")}`,
       backHomeKeyboard(buyerLang)
     );
+    if (procRes && procRes.ok && procRes.result) {
+      order.processingMsg = { chatId: order.userId, messageId: procRes.result.message_id };
+      await saveOrder(db, order);
+    }
     await processDonixOrder(env, db, order, buyerLang, order.userId);
     return new Response("ok", { status: 200 });
   }
