@@ -2002,6 +2002,19 @@ async function handleMessage(env, db, msg) {
     return;
   }
 
+  // Admin: /checkorders  (asks Donix about every order stuck in "processing" and delivers receipts)
+  if (text.startsWith("/checkorders") && isAdmin(env, userId)) {
+    const r = await syncProcessingOrders(env, db);
+    await sendMessage(
+      env,
+      chatId,
+      `🔎 Проверено: ${r.checked}, обновлено: ${r.updated}\n` +
+        (r.sample ? `Ответ Donix (пример): ${r.sample}\n` : "") +
+        (r.errors.length ? `Ошибки:\n${r.errors.slice(0, 5).join("\n")}` : "")
+    );
+    return;
+  }
+
   // Admin: /syncprices [НАЦЕНКА_%]  (prices = Donix price + markup; markup is remembered)
   if (text.startsWith("/syncprices") && isAdmin(env, userId)) {
     const arg = text.split(/\s+/)[1];
@@ -3049,26 +3062,53 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
 
 /* ================= WEBHOOK VERIFICATION ================= */
 
+async function donixHmacHex(secret, rawBody) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sigBuffer = await crypto.subtle.sign("HMAC", key, enc.encode(rawBody));
+  return [...new Uint8Array(sigBuffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function verifyDonixSignature(env, request, rawBody) {
   const signature = request.headers.get("X-Donix-Signature");
   const eventHeader = request.headers.get("X-Donix-Event");
-  if (!signature || !env.DONIX_WEBHOOK_SECRET) return { ok: false, event: eventHeader };
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(env.DONIX_WEBHOOK_SECRET),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sigBuffer = await crypto.subtle.sign("HMAC", key, enc.encode(rawBody));
-  const computed = [...new Uint8Array(sigBuffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (!signature || !env.DONIX_WEBHOOK_SECRET) return { ok: false, event: eventHeader, reason: !signature ? "no signature header" : "no DONIX_WEBHOOK_SECRET" };
   // Donix sends the header as "sha256=<hex>"
   const received = signature.trim().replace(/^sha256=/i, "").toLowerCase();
-  let diff = computed.length ^ received.length;
-  for (let i = 0; i < computed.length; i++) diff |= computed.charCodeAt(i) ^ (received.charCodeAt(i) || 0);
-  const ok = diff === 0;
-  return { ok, event: eventHeader };
+  // The secret may have been stored with or without the "whsec_" prefix: accept both.
+  const raw = String(env.DONIX_WEBHOOK_SECRET).trim();
+  const variants = [raw];
+  if (/^whsec_/i.test(raw)) variants.push(raw.replace(/^whsec_/i, ""));
+  else variants.push("whsec_" + raw);
+  for (const secret of variants) {
+    const computed = await donixHmacHex(secret, rawBody);
+    let diff = computed.length ^ received.length;
+    for (let i = 0; i < computed.length; i++) diff |= computed.charCodeAt(i) ^ (received.charCodeAt(i) || 0);
+    if (diff === 0) return { ok: true, event: eventHeader };
+  }
+  return { ok: false, event: eventHeader, reason: "signature mismatch (wrong DONIX_WEBHOOK_SECRET?)" };
+}
+
+/* Maps whatever Donix calls a status to the four we handle. */
+function normalizeDonixStatus(raw) {
+  const s = String(raw || "").toLowerCase().trim();
+  if (["completed", "complete", "done", "success", "succeeded", "delivered", "fulfilled"].includes(s)) return "completed";
+  if (["failed", "fail", "error", "cancelled", "canceled", "rejected"].includes(s)) return "failed";
+  if (["refunded", "refund"].includes(s)) return "refunded";
+  if (["processing", "pending", "in_progress", "created", "new"].includes(s)) return "processing";
+  return s;
+}
+
+function extractDonixOrderInfo(payload) {
+  const p = payload || {};
+  const nested = [p, p.order, p.data, p.data && p.data.order].filter(Boolean);
+  let externalId = null;
+  let status = null;
+  for (const o of nested) {
+    externalId = externalId || o.external_id || o.externalId || null;
+    status = status || o.status || null;
+  }
+  return { externalId, status: normalizeDonixStatus(status) };
 }
 
 /* ================= ROUTE HANDLERS ================= */
@@ -3097,8 +3137,10 @@ async function routeTelegramWebhook(env, db, request) {
 
 async function routeDonixWebhook(env, db, request) {
   const rawBody = await request.text();
+  console.log("donix-webhook: received", request.headers.get("X-Donix-Event"), rawBody.slice(0, 600));
   const verification = await verifyDonixSignature(env, request, rawBody);
   if (!verification.ok) {
+    console.log("donix-webhook: REJECTED —", verification.reason);
     return new Response("invalid signature", { status: 401 });
   }
 
@@ -3109,14 +3151,58 @@ async function routeDonixWebhook(env, db, request) {
     return new Response("bad request", { status: 400 });
   }
 
-  const externalId = payload.external_id || payload.externalId || (payload.order && payload.order.external_id);
-  const status = payload.status || (payload.order && payload.order.status);
+  const { externalId, status } = extractDonixOrderInfo(payload);
+  console.log("donix-webhook: parsed", externalId, status);
 
   if (externalId && status) {
-    await handleDonixStatusUpdate(env, db, externalId, status);
+    try {
+      await handleDonixStatusUpdate(env, db, externalId, status);
+    } catch (e) {
+      console.log("donix-webhook: handler error", String(e));
+    }
+  } else {
+    console.log("donix-webhook: could not find external_id/status in payload");
   }
 
   return new Response("ok", { status: 200 });
+}
+
+/* Fallback when the webhook does not arrive: asks Donix directly for every order that is
+   still "processing" and feeds the answer through the same handler as the webhook. */
+async function syncProcessingOrders(env, db) {
+  const report = { checked: 0, updated: 0, sample: null, errors: [] };
+  const list = await db.list({ prefix: "order:" });
+  for (const k of list.keys) {
+    if (report.checked >= 40) break;
+    const order = await getJSON(db, k.name);
+    if (!order || order.status !== "processing") continue;
+    const ids = [];
+    if (order.items && order.items.length > 0) {
+      for (const line of order.items) {
+        const qty = Math.max(1, line.qty || 1);
+        for (let i = 1; i <= qty; i++) {
+          ids.push(qty > 1 ? `${order.internalId}::${line.itemId}#${i}` : `${order.internalId}::${line.itemId}`);
+        }
+      }
+    } else {
+      ids.push(order.internalId);
+    }
+    for (const externalId of ids) {
+      report.checked++;
+      const r = await donixOrderByExternal(env, externalId);
+      if (!report.sample) report.sample = `HTTP ${r.status} ${JSON.stringify(r.data).slice(0, 300)}`;
+      if (!r.ok || !r.data) {
+        report.errors.push(`${externalId}: ${donixErrText(r)}`);
+        continue;
+      }
+      const { status } = extractDonixOrderInfo(r.data);
+      if (status === "completed" || status === "failed" || status === "refunded") {
+        await handleDonixStatusUpdate(env, db, externalId, status);
+        report.updated++;
+      }
+    }
+  }
+  return report;
 }
 
 async function routePaymentWebhook(env, db, request) {
@@ -3243,6 +3329,11 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
+        try {
+          await syncProcessingOrders(env, env.DB);
+        } catch (e) {
+          console.log("syncProcessingOrders error", String(e));
+        }
         const markup = await env.DB.get("config:markup_percent");
         if (markup === null || markup === undefined) return;
         const r = await syncPricesFromDonix(env, markup);
