@@ -489,6 +489,9 @@ function kvKeyConfig(key) {
 function kvKeyPriceOverride(catKey, itemId) {
   return `price:${catKey}:${itemId}`;
 }
+/* Поставьте false, чтобы снова включить покупку Telegram Stars. */
+const STARS_TEMP_DISABLED = true;
+
 function kvKeyStarsPricePerStar() {
   return `config:tgstars_price_per_star`;
 }
@@ -1399,6 +1402,11 @@ async function handleCallbackQuery(env, db, cq) {
 
     if (ns === "cat") {
       const catKey = a;
+      if (catKey === "tg_stars" && STARS_TEMP_DISABLED) {
+        await clearState(db, userId);
+        await editMessage(env, chatId, messageId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+        return answerCallback(env, cq.id);
+      }
       if (catKey === "tg_stars") {
         await setState(db, userId, { step: "await_stars_username", data: {} });
         const starsInfo = await starsPriceInfo(db, lang);
