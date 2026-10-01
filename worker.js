@@ -2453,6 +2453,104 @@ function adminBalanceView(user) {
   return { text, keyboard };
 }
 
+/* ================= ADMIN: ORDERS LIST ================= */
+
+const ADMIN_ORDERS_PER_PAGE = 5;
+const ADMIN_ORDER_FILTERS = {
+  all: { label: "Все", statuses: null },
+  active: { label: "В процессе", statuses: ["pending_payment", "paid", "processing"] },
+  done: { label: "Выполнены", statuses: ["completed"] },
+  bad: { label: "Проблемные", statuses: ["failed", "refunded", "cancelled"] },
+};
+
+const ADMIN_ORDER_STATUS_RU = {
+  pending_payment: "🟡 Ожидает оплаты — клиент создал заказ, но ещё не оплатил",
+  paid: "🟡 Оплачен — деньги получены, заказ ещё не передан поставщику",
+  processing: "🟡 В обработке — отправлен поставщику (Donix), ждём выполнения",
+  completed: "🟢 Выполнен — товар доставлен клиенту",
+  cancelled: "🔴 Отменён — клиент отменил заказ до оплаты",
+  failed: "🔴 Не выполнен — поставщик не смог выполнить заказ",
+  refunded: "🔴 Возврат — деньги возвращены клиенту",
+};
+
+const ADMIN_LINE_STATUS_RU = {
+  pending: "⏳ ожидает",
+  processing: "🟡 в обработке",
+  completed: "🟢 выполнен",
+  failed: "🔴 не выполнен",
+  refunded: "🔴 возврат",
+};
+
+function escHtml(v) {
+  return String(v == null ? "" : v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function fmtDateRu(iso) {
+  if (!iso) return "—";
+  const d = new Date(new Date(iso).getTime() + 6 * 3600 * 1000); // Бишкек, UTC+6
+  if (isNaN(d.getTime())) return "—";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getUTCDate())}.${pad(d.getUTCMonth() + 1)}.${d.getUTCFullYear()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+
+/* Reads EVERY order (follows KV cursors; a single list() call returns at most 1000 keys). */
+async function loadAllOrders(db) {
+  const keys = [];
+  let cursor;
+  do {
+    const res = await db.list({ prefix: "order:", cursor });
+    keys.push(...res.keys.map((k) => k.name));
+    cursor = res.list_complete ? undefined : res.cursor;
+  } while (cursor);
+  const orders = [];
+  for (let i = 0; i < keys.length; i += 25) {
+    const chunk = await Promise.all(keys.slice(i, i + 25).map((k) => getJSON(db, k)));
+    for (const o of chunk) if (o) orders.push(o);
+  }
+  // newest first (keys are random UUIDs, so the KV order says nothing about time)
+  orders.sort((x, y) => String(y.createdAt || "").localeCompare(String(x.createdAt || "")));
+  return orders;
+}
+
+async function adminOrdersView(db, page, filter) {
+  const all = await loadAllOrders(db);
+  const allowed = ADMIN_ORDER_FILTERS[filter].statuses;
+  const orders = allowed ? all.filter((o) => allowed.includes(o.status)) : all;
+  const pages = Math.max(1, Math.ceil(orders.length / ADMIN_ORDERS_PER_PAGE));
+  const cur = Math.min(page, pages - 1);
+  const slice = orders.slice(cur * ADMIN_ORDERS_PER_PAGE, (cur + 1) * ADMIN_ORDERS_PER_PAGE);
+
+  const lines = [`📦 Заказы — ${ADMIN_ORDER_FILTERS[filter].label}`, `Найдено: ${orders.length} (всего заказов: ${all.length}) • стр. ${cur + 1}/${pages}`];
+  if (slice.length === 0) lines.push("", "Заказов нет.");
+  for (const o of slice) {
+    const user = await getJSON(db, kvKeyUser(o.userId));
+    const who = user && user.username ? `@${escHtml(user.username)} (${escHtml(o.userId)})` : escHtml(o.userId);
+    lines.push("", `━━━━━━━━━━━━`, `<b>№ ${escHtml(o.orderNumber)}</b> • ${fmtDateRu(o.createdAt)}`);
+    lines.push(`👤 Клиент: ${who}`);
+    lines.push(`🎮 Товар: ${escHtml(o.itemName)}`);
+    if (o.items && o.items.length > 0) {
+      for (const l of o.items) {
+        lines.push(`   • ${escHtml(l.name)} × ${l.qty || 1} — ${ADMIN_LINE_STATUS_RU[l.status] || escHtml(l.status)}`);
+      }
+    }
+    const uid = Object.entries(o.uidData || {}).map(([k, v]) => `${escHtml(k)}: ${escHtml(v)}`).join(", ");
+    if (uid) lines.push(`🆔 Данные: ${uid}`);
+    lines.push(`💰 Сумма: ${fmtSom(o.total)} сом` + (o.discount ? ` (скидка ${fmtSom(o.discount)})` : "") + (o.promoCode ? ` • промокод ${escHtml(o.promoCode)}` : ""));
+    lines.push(`📌 Статус: ${ADMIN_ORDER_STATUS_RU[o.status] || escHtml(o.status)}`);
+    if (o.updatedAt && o.updatedAt !== o.createdAt) lines.push(`🕒 Обновлён: ${fmtDateRu(o.updatedAt)}`);
+  }
+
+  const rows = [
+    Object.entries(ADMIN_ORDER_FILTERS).map(([key, f]) => btn(key === filter ? `• ${f.label}` : f.label, `admin:orders:0:${key}`)),
+  ];
+  const nav = [];
+  if (cur > 0) nav.push(btn("◀️ Назад", `admin:orders:${cur - 1}:${filter}`));
+  if (cur < pages - 1) nav.push(btn("Вперёд ▶️", `admin:orders:${cur + 1}:${filter}`));
+  if (nav.length) rows.push(nav);
+  rows.push([btn("⬅️", "admin:home")]);
+  return { text: lines.join("\n"), keyboard: ikb(rows) };
+}
+
 async function handleAdminCallback(env, db, cq, a, b, c, lang) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
@@ -2691,15 +2789,10 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     await setState(db, userId, { step: "admin_broadcast", data: {} });
     await editMessage(env, chatId, messageId, "Отправьте текст рассылки:", ikb([[btn("⬅️", "admin:home")]]));
   } else if (a === "orders") {
-    const orderKeys = await db.list({ prefix: "order:" });
-    const recent = orderKeys.keys.slice(-15).reverse();
-    const lines = ["📦 Последние заказы:"];
-    for (const k of recent) {
-      const o = await getJSON(db, k.name);
-      if (o) lines.push(`№ ${o.orderNumber} — ${o.itemName} — ${fmtSom(o.total)} сом — ${o.status}`);
-    }
-    if (recent.length === 0) lines.push("Пока нет заказов.");
-    await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:home")]]));
+    const page = Math.max(0, parseInt(b, 10) || 0);
+    const filter = ADMIN_ORDER_FILTERS[c] ? c : "all";
+    const view = await adminOrdersView(db, page, filter);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
   } else if (a === "users") {
     const userKeys = await db.list({ prefix: "user:" });
     const recent = userKeys.keys.slice(-15).reverse();
