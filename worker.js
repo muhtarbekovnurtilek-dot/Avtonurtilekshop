@@ -2551,6 +2551,54 @@ async function adminOrdersView(db, page, filter) {
   return { text: lines.join("\n"), keyboard: ikb(rows) };
 }
 
+const ADMIN_WALLETS_PER_PAGE = 10;
+
+/* Every user (follows KV cursors; one list() call returns at most 1000 keys). */
+async function loadAllUsers(db) {
+  const keys = [];
+  let cursor;
+  do {
+    const res = await db.list({ prefix: "user:", cursor });
+    keys.push(...res.keys.map((k) => k.name));
+    cursor = res.list_complete ? undefined : res.cursor;
+  } while (cursor);
+  const users = [];
+  for (let i = 0; i < keys.length; i += 25) {
+    const chunk = await Promise.all(keys.slice(i, i + 25).map((k) => getJSON(db, k)));
+    for (const u of chunk) if (u) users.push(u);
+  }
+  return users;
+}
+
+async function adminWalletsView(db, page) {
+  const users = await loadAllUsers(db);
+  users.sort((x, y) => (y.balance || 0) - (x.balance || 0));
+  const total = users.reduce((sum, u) => round2(sum + (u.balance || 0)), 0);
+  const pages = Math.max(1, Math.ceil(users.length / ADMIN_WALLETS_PER_PAGE));
+  const cur = Math.min(Math.max(0, page), pages - 1);
+  const slice = users.slice(cur * ADMIN_WALLETS_PER_PAGE, (cur + 1) * ADMIN_WALLETS_PER_PAGE);
+
+  const lines = [
+    "💰 Кошельки (по убыванию баланса)",
+    `Пользователей: ${users.length} • на всех балансах: ${fmtSom(total)} сом • стр. ${cur + 1}/${pages}`,
+    "",
+  ];
+  let n = cur * ADMIN_WALLETS_PER_PAGE;
+  for (const u of slice) {
+    n++;
+    lines.push(`${n}. ${escHtml(u.id)} @${escHtml(u.username || "-")} — ${fmtSom(u.balance || 0)} сом (потрачено: ${fmtSom(u.spent || 0)} сом)`);
+  }
+  if (users.length === 0) lines.push("Пока нет пользователей.");
+
+  const rows = [];
+  const nav = [];
+  if (cur > 0) nav.push(btn("◀️ Назад", `admin:wallets:${cur - 1}`));
+  if (cur < pages - 1) nav.push(btn("Вперёд ▶️", `admin:wallets:${cur + 1}`));
+  if (nav.length) rows.push(nav);
+  rows.push([btn("⬅️", "admin:home")]);
+  return { text: lines.join("\n"), keyboard: ikb(rows) };
+}
+
 async function handleAdminCallback(env, db, cq, a, b, c, lang) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
@@ -2803,19 +2851,8 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     }
     await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:home")]]));
   } else if (a === "wallets") {
-    const userKeys = await db.list({ prefix: "user:" });
-    const users = [];
-    for (const k of userKeys.keys) {
-      const u = await getJSON(db, k.name);
-      if (u) users.push(u);
-    }
-    users.sort((x, y) => (y.balance || 0) - (x.balance || 0));
-    const lines = ["💰 Кошельки (топ по балансу):"];
-    for (const u of users.slice(0, 15)) {
-      lines.push(`${u.id} @${u.username || "-"} — ${u.balance} сом (потрачено: ${u.spent || 0} сом)`);
-    }
-    if (users.length === 0) lines.push("Пока нет пользователей.");
-    await editMessage(env, chatId, messageId, lines.join("\n"), ikb([[btn("⬅️", "admin:home")]]));
+    const view = await adminWalletsView(db, parseInt(b, 10) || 0);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
   } else if (a === "topups") {
     const topupKeys = await db.list({ prefix: "topup:" });
     const topups = [];
