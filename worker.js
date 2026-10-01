@@ -125,6 +125,8 @@ const T = {
     btn_freefire: "🔥 Free Fire",
     btn_pubg: "🔫 PUBG Mobile",
     btn_mlbb: "⚔️ Mobile Legends",
+    btn_codm: "🎯 Call of Duty Mobile",
+    btn_genshin: "✨ Genshin Impact",
     btn_tg: "⭐ Telegram",
     btn_games: "🎮 Игры и сервисы",
     btn_wallet: "💰 Кошелёк",
@@ -156,6 +158,9 @@ const T = {
     prices_title: "💰 Цены:",
     enter_uid_ff: "Введите UID Free Fire:",
     enter_uid_pubg: "Введите PUBG ID:",
+    enter_uid_codm: "Введите ID Call of Duty Mobile (регион Казахстан):",
+    enter_uid_genshin: "Введите UID Genshin Impact:",
+    codm_invalid_id: "❌ ID не найден.\n\nЛибо вы неверно ввели ID, либо это не регион Казахстан.\nПроверьте и попробуйте ещё раз.",
     enter_player_id_mlbb: "Введите Player ID:",
     enter_server_id_mlbb: "Введите Server ID:",
     enter_username_tg: "Введите @username:",
@@ -225,6 +230,8 @@ const T = {
     btn_freefire: "🔥 Free Fire",
     btn_pubg: "🔫 PUBG Mobile",
     btn_mlbb: "⚔️ Mobile Legends",
+    btn_codm: "🎯 Call of Duty Mobile",
+    btn_genshin: "✨ Genshin Impact",
     btn_tg: "⭐ Telegram",
     btn_games: "🎮 Оюндар жана кызматтар",
     btn_wallet: "💰 Капчык",
@@ -256,6 +263,9 @@ const T = {
     prices_title: "💰 Баалар:",
     enter_uid_ff: "Free Fire UID киргизиңиз:",
     enter_uid_pubg: "PUBG ID киргизиңиз:",
+    enter_uid_codm: "Call of Duty Mobile ID киргизиңиз (Казахстан региону):",
+    enter_uid_genshin: "Genshin Impact UID киргизиңиз:",
+    codm_invalid_id: "❌ ID табылган жок.\n\nЖаңылыш ID киргизген окшойсуз, же бул Казахстан региону эмес.\nТекшерип, кайра аракет кылыңыз.",
     enter_player_id_mlbb: "Player ID киргизиңиз:",
     enter_server_id_mlbb: "Server ID киргизиңиз:",
     enter_username_tg: "@username киргизиңиз:",
@@ -418,6 +428,33 @@ const CATALOG = {
       { id: "ml_1765", name: "1765 Diamonds", price: 2532 },
       { id: "ml_2975", name: "2975 Diamonds", price: 4399 },
       { id: "ml_6000", name: "6000 Diamonds", price: 8403 },
+    ],
+  },
+  codm: {
+    name: "Call of Duty Mobile",
+    inputType: "codm_id",
+    donixCategory: "codm",
+    invalidKey: "codm_invalid_id",
+    items: [
+      { id: "codm_88", name: "80 + 8 CP", price: 130, sku: "codm-88-cp" },
+      { id: "codm_460", name: "400 + 60 CP", price: 572, sku: "codm-460-cp" },
+      { id: "codm_960", name: "800 + 160 CP", price: 1199, sku: "codm-960-cp" },
+      { id: "codm_2600", name: "2000 + 600 CP", price: 2770, sku: "codm-2600-cp" },
+      { id: "codm_5400", name: "4000 + 1400 CP", price: 5410, sku: "codm-5400-cp" },
+    ],
+  },
+  genshin: {
+    name: "Genshin Impact",
+    inputType: "genshin_id",
+    donixCategory: "genshin",
+    items: [
+      { id: "genshin_60", name: "60 Genesis Crystals", price: 105, sku: "genshin-60-crystals" },
+      { id: "genshin_330", name: "300 + 30 Genesis Crystals", price: 545, sku: "genshin-330-crystals" },
+      { id: "genshin_welkin", name: "Blessing of the Welkin Moon", price: 550, sku: "genshin-welkin-moon" },
+      { id: "genshin_1090", name: "980 + 110 Genesis Crystals", price: 1599, sku: "genshin-1090-crystals" },
+      { id: "genshin_2240", name: "1980 + 260 Genesis Crystals", price: 3195, sku: "genshin-2240-crystals" },
+      { id: "genshin_3880", name: "3280 + 600 Genesis Crystals", price: 5386, sku: "genshin-3880-crystals" },
+      { id: "genshin_8080", name: "6480 + 1600 Genesis Crystals", price: 10999, sku: "genshin-8080-crystals" },
     ],
   },
   tg_stars: {
@@ -736,6 +773,8 @@ const DONIX_GAME_KEYWORDS = {
   freefire: ["free fire", "freefire"],
   pubg: ["pubg"],
   mlbb: ["mobile legends", "mobile legend", "mlbb"],
+  codm: ["call of duty", "codm", "cod mobile"],
+  genshin: ["genshin", "геншин"],
   tgstars: ["star", "звезд"],
   tgpremium: ["premium", "премиум"],
 };
@@ -1146,6 +1185,8 @@ function gamesMenuKeyboard(lang) {
     btn(t(lang, "btn_freefire"), "cat:freefire"),
     btn(t(lang, "btn_pubg"), "menu:pubg"),
     btn(t(lang, "btn_mlbb"), "cat:mlbb"),
+    btn(t(lang, "btn_codm"), "cat:codm"),
+    btn(t(lang, "btn_genshin"), "cat:genshin"),
     btn(t(lang, "btn_tg"), "menu:tg"),
   ];
   const rows = twoPerRow(items);
@@ -1354,6 +1395,8 @@ async function getResolvedItems(db, catKey) {
 function inputPromptKey(inputType, step) {
   if (inputType === "uid") return "enter_uid_ff";
   if (inputType === "pubg_id") return "enter_uid_pubg";
+  if (inputType === "codm_id") return "enter_uid_codm";
+  if (inputType === "genshin_id") return "enter_uid_genshin";
   if (inputType === "ml_id") return step === "player" ? "enter_player_id_mlbb" : "enter_server_id_mlbb";
   if (inputType === "tg_username") return "enter_username_tg";
   return "enter_uid_ff";
@@ -2126,7 +2169,7 @@ async function handleMessage(env, db, msg) {
       return;
     }
     if (!validation.data || validation.data.valid === false) {
-      await sendMessage(env, chatId, t(lang, "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `cat:${state.data.catKey}`)]]));
+      await sendMessage(env, chatId, t(lang, (cat && cat.invalidKey) || "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `cat:${state.data.catKey}`)]]));
       return;
     }
     const uidData = { UID: uid, "Ник": validation.data.player_name || validation.data.nickname || validation.data.name || "—" };
@@ -2413,6 +2456,8 @@ const CATALOG_LABELS = {
   pubg_prime: "PUBG — Prime",
   pubg_primeplus: "PUBG — Prime+",
   mlbb: "Mobile Legends",
+  codm: "Call of Duty Mobile",
+  genshin: "Genshin Impact",
   tg_stars: "Telegram Stars",
   tg_premium: "Telegram Premium",
 };
