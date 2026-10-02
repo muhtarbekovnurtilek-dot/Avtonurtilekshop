@@ -1854,7 +1854,43 @@ async function sendCompletedReceipt(env, userId, lang, order) {
 
 /* ================= DONIX ORDER PROCESSING ================= */
 
-async function processDonixOrder(env, db, order, lang, chatId) {
+/* Safe wrapper: if anything throws, the "already started" guard is released so the order can be
+   retried (/retryorder N or the cron job) instead of being stuck in "paid" forever. */
+async function processDonixOrder(env, db, order, lang, chatId, isRetry = false) {
+  try {
+    await processDonixOrderInner(env, db, order, lang, chatId, isRetry);
+  } catch (e) {
+    console.log("processDonixOrder error", order.orderNumber, String(e));
+    await db.delete(kvKeyIdemp("donixcreate", order.internalId));
+    await notifyAdminDonix(env, `заказ №${order.orderNumber}: ошибка при отправке в Donix (${String(e).slice(0, 200)}). Повтор: /retryorder ${order.orderNumber}`);
+  }
+}
+
+/* Re-sends orders that were paid but never reached Donix. Before creating anything it asks Donix
+   whether that external_id already exists, so nothing is ever ordered twice. */
+async function retryPaidOrder(env, db, order) {
+  if (!order || order.status !== "paid") return false;
+  const buyer = await getUser(db, order.userId);
+  await db.delete(kvKeyIdemp("donixcreate", order.internalId));
+  await processDonixOrder(env, db, order, buyer.lang || "ru", order.userId, true);
+  return true;
+}
+
+async function retryStuckPaidOrders(env, db, minAgeMs = 3 * 60 * 1000, maxAgeMs = 20 * 60 * 1000) {
+  let n = 0;
+  const list = await db.list({ prefix: "order:" });
+  for (const k of list.keys) {
+    if (n >= 10) break;
+    const o = await getJSON(db, k.name);
+    if (!o || o.status !== "paid") continue;
+    const age = Date.now() - new Date(o.updatedAt || o.createdAt).getTime();
+    if (age < minAgeMs || age > maxAgeMs) continue; // old ones may already be delivered by hand -> only /retryorder
+    if (await retryPaidOrder(env, db, o)) n++;
+  }
+  return n;
+}
+
+async function processDonixOrderInner(env, db, order, lang, chatId, isRetry) {
   const first = await idempotentOnce(db, "donixcreate", order.internalId);
   if (!first) return;
 
@@ -1883,7 +1919,12 @@ async function processDonixOrder(env, db, order, lang, chatId) {
         const externalId = qty > 1 ? `${order.internalId}::${line.itemId}#${i}` : `${order.internalId}::${line.itemId}`;
         const payload = { external_id: externalId, sku, uid };
         if (server) payload.server = server;
-        const r = await donixCreateOrder(env, payload);
+        let r = null;
+        if (isRetry) {
+          const ex = await donixOrderByExternal(env, externalId);
+          if (ex.ok && ex.data) r = ex;
+        }
+        if (!r) r = await donixCreateOrder(env, payload);
         if (!r.ok || !r.data) return failOrder(`${line.name}: ${donixErrText(r)}`);
         line.units[String(i)] = "processing";
         created.push(r.data.order_id || r.data.id || null);
@@ -1901,7 +1942,12 @@ async function processDonixOrder(env, db, order, lang, chatId) {
 
   const payload = { external_id: order.internalId, sku, uid };
   if (server) payload.server = server;
-  const result = await donixCreateOrder(env, payload);
+  let result = null;
+  if (isRetry) {
+    const ex = await donixOrderByExternal(env, order.internalId);
+    if (ex.ok && ex.data) result = ex;
+  }
+  if (!result) result = await donixCreateOrder(env, payload);
   if (!result.ok || !result.data) return failOrder(donixErrText(result));
 
   order.donixOrderId = result.data.order_id || result.data.id || null;
@@ -2074,13 +2120,49 @@ async function handleMessage(env, db, msg) {
     return;
   }
 
+  // Admin: /closeorder N  (order was delivered by hand -> close it, nothing is sent to Donix)
+  if (text.startsWith("/closeorder") && isAdmin(env, userId)) {
+    const num = text.split(/\s+/)[1];
+    const o = num ? await getOrderByNumber(db, num) : null;
+    if (!o) {
+      await sendMessage(env, chatId, "Формат: /closeorder НОМЕР_ЗАКАЗА\nЗакрывает заказ, который вы выдали вручную.");
+      return;
+    }
+    o.status = "completed";
+    o.closedManually = true;
+    if (o.items) o.items.forEach((l) => (l.status = "completed"));
+    await saveOrder(db, o);
+    await idempotentOnce(db, "donixcreate", o.internalId); // block any later auto-send
+    await sendMessage(env, chatId, `✅ Заказ №${o.orderNumber} закрыт как выполненный вручную. В Donix ничего не отправлено.`);
+    return;
+  }
+
+  // Admin: /retryorder N  (re-sends a paid order that never reached Donix)
+  if (text.startsWith("/retryorder") && isAdmin(env, userId)) {
+    const num = text.split(/\s+/)[1];
+    const o = num ? await getOrderByNumber(db, num) : null;
+    if (!o) {
+      await sendMessage(env, chatId, "Формат: /retryorder НОМЕР_ЗАКАЗА\nНапример: /retryorder 125");
+      return;
+    }
+    if (o.status !== "paid") {
+      await sendMessage(env, chatId, `Заказ №${o.orderNumber} в статусе «${o.status}». Повтор возможен только для «paid» (оплачен, но не ушёл в Donix).`);
+      return;
+    }
+    await retryPaidOrder(env, db, o);
+    const after = await getOrder(db, o.internalId);
+    await sendMessage(env, chatId, `🔁 Заказ №${o.orderNumber}: теперь статус «${after ? after.status : "?"}».`);
+    return;
+  }
+
   // Admin: /checkorders  (asks Donix about every order stuck in "processing" and delivers receipts)
   if (text.startsWith("/checkorders") && isAdmin(env, userId)) {
+    const retried = await retryStuckPaidOrders(env, db, 0);
     const r = await syncProcessingOrders(env, db);
     await sendMessage(
       env,
       chatId,
-      `🔎 Проверено: ${r.checked}, обновлено: ${r.updated}\n` +
+      `🔁 Повторно отправлено застрявших оплаченных: ${retried}\n🔎 Проверено: ${r.checked}, обновлено: ${r.updated}\n` +
         (r.sample ? `Ответ Donix (пример): ${r.sample}\n` : "") +
         (r.errors.length ? `Ошибки:\n${r.errors.slice(0, 5).join("\n")}` : "")
     );
@@ -3411,7 +3493,7 @@ async function syncProcessingOrders(env, db) {
   return report;
 }
 
-async function routePaymentWebhook(env, db, request) {
+async function routePaymentWebhook(env, db, request, ctx) {
   const url = new URL(request.url);
   const rawBody = await request.text();
 
@@ -3458,19 +3540,32 @@ async function routePaymentWebhook(env, db, request) {
     await saveOrder(db, order);
     await finalizeOrderPaid(db, order);
 
-    const buyer = await getUser(db, order.userId);
-    const buyerLang = buyer.lang || "ru";
-    const procRes = await sendMessage(
-      env,
-      order.userId,
-      `${t(buyerLang, "order_created", order.orderNumber)}\n${t(buyerLang, "processing")}`,
-      backHomeKeyboard(buyerLang)
-    );
-    if (procRes && procRes.ok && procRes.result) {
-      order.processingMsg = { chatId: order.userId, messageId: procRes.result.message_id };
-      await saveOrder(db, order);
-    }
-    await processDonixOrder(env, db, order, buyerLang, order.userId);
+    const tail = (async () => {
+      try {
+        const buyer = await getUser(db, order.userId);
+        const buyerLang = buyer.lang || "ru";
+        try {
+          const procRes = await sendMessage(
+            env,
+            order.userId,
+            `${t(buyerLang, "order_created", order.orderNumber)}\n${t(buyerLang, "processing")}`,
+            backHomeKeyboard(buyerLang)
+          );
+          if (procRes && procRes.ok && procRes.result) {
+            order.processingMsg = { chatId: order.userId, messageId: procRes.result.message_id };
+            await saveOrder(db, order);
+          }
+        } catch (e) {
+          console.log("processing msg error", String(e));
+        }
+        await processDonixOrder(env, db, order, buyerLang, order.userId);
+      } catch (e) {
+        console.log("payment tail error", String(e));
+        await notifyAdminDonix(env, `заказ №${order.orderNumber} оплачен, но не отправлен: ${String(e).slice(0, 200)}. /retryorder ${order.orderNumber}`);
+      }
+    })();
+    if (ctx && ctx.waitUntil) ctx.waitUntil(tail);
+    else await tail;
     return new Response("ok", { status: 200 });
   }
 
@@ -3529,7 +3624,7 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/payment-webhook") {
-      return routePaymentWebhook(env, db, request);
+      return routePaymentWebhook(env, db, request, ctx);
     }
 
     return new Response("not found", { status: 404 });
@@ -3539,6 +3634,11 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
+        try {
+          await retryStuckPaidOrders(env, env.DB);
+        } catch (e) {
+          console.log("retryStuckPaidOrders error", String(e));
+        }
         try {
           await syncProcessingOrders(env, env.DB);
         } catch (e) {
