@@ -365,16 +365,24 @@ const CATALOG = {
     name: "Free Fire",
     inputType: "uid",
     donixCategory: "freefire",
+    // fixed: true -> цена задана вручную, /syncprices и cron её не трогают.
+    // sku -> точный SKU Donix, автоподбор по названию не нужен.
     items: [
-      { id: "ff_110", name: "💎 110", price: 81 },
-      { id: "ff_341", name: "💎 341", price: 270 },
-      { id: "ff_572", name: "💎 572", price: 450 },
-      { id: "ff_1166", name: "💎 1166", price: 847 },
-      { id: "ff_2398", name: "💎 2398", price: 1594 },
-      { id: "ff_6160", name: "💎 6160", price: 3850 },
-      { id: "ff_lite_week", name: "🔹 Lite Ваучер (90💎)", price: 46 },
-      { id: "ff_week", name: "🔹 Ваучер на неделю (450💎)", price: 170 },
-      { id: "ff_month", name: "🔹 Ваучер на месяц (2600💎)", price: 699 },
+      { id: "ff_110", name: "💎 110", price: 75, sku: "110-алмазов", fixed: true },
+      { id: "ff_341", name: "💎 341", price: 228, sku: "341-алмаз", fixed: true },
+      { id: "ff_572", name: "💎 572", price: 370, sku: "572-алмаза", fixed: true },
+      { id: "ff_1166", name: "💎 1166", price: 745, sku: "1166-алмазов", fixed: true },
+      { id: "ff_2398", name: "💎 2398", price: 1459, sku: "2398-алмазов", fixed: true },
+      { id: "ff_6160", name: "💎 6160", price: 3702, sku: "6160-алмазов", fixed: true },
+      { id: "ff_lite_week", name: "🔹 Lite Ваучер (90💎)", price: 39, sku: "ваучер-на-неделю-лайт", fixed: true },
+      { id: "ff_week", name: "🔹 Ваучер на неделю (450💎)", price: 149, sku: "ваучер-на-неделю", fixed: true },
+      { id: "ff_month", name: "🔹 Ваучер на месяц (2600💎)", price: 532, sku: "ваучер-на-месяц", fixed: true },
+      { id: "ff_lvl_6", name: "🔹 Пропуск прокачки 6 LVL", price: 48, sku: "пропуск-прокачки-6-lvl", fixed: true },
+      { id: "ff_lvl_10", name: "🔹 Пропуск прокачки 10 LVL", price: 68, sku: "пропуск-прокачки-10-lvl", fixed: true },
+      { id: "ff_lvl_15", name: "🔹 Пропуск прокачки 15 LVL", price: 68, sku: "пропуск-прокачки-15-lvl", fixed: true },
+      { id: "ff_lvl_20", name: "🔹 Пропуск прокачки 20 LVL", price: 68, sku: "пропуск-прокачки-20-lvl", fixed: true },
+      { id: "ff_lvl_25", name: "🔹 Пропуск прокачки 25 LVL", price: 68, sku: "пропуск-прокачки-25-lvl", fixed: true },
+      { id: "ff_lvl_30", name: "🔹 Пропуск прокачки 30 LVL", price: 100, sku: "пропуск-прокачки-30-lvl", fixed: true },
     ],
   },
   pubg_uc: {
@@ -886,6 +894,7 @@ async function syncPricesFromDonix(env, markupPercent) {
       continue;
     }
     for (const item of cat.items) {
+      if (item.fixed) continue; // price set manually in CATALOG
       const sku = await resolveDonixSku(env, catKey, item.id, item.name);
       const base = sku && bySku.has(sku) ? Number(bySku.get(sku).price) : NaN;
       if (!Number.isFinite(base) || base <= 0) {
@@ -897,6 +906,12 @@ async function syncPricesFromDonix(env, markupPercent) {
     }
   }
   return { ok: true, changed, missing };
+}
+
+/* Cart orders store itemId as "ff_110+ff_week"; for UID validation any single line's SKU works. */
+function validationItemRef(data) {
+  const first = data.items && data.items[0];
+  return first ? [first.itemId, first.name] : [data.itemId, data.itemName];
 }
 
 /* Game ID / target the way Donix expects it (the `uid` field). */
@@ -2153,7 +2168,7 @@ async function handleMessage(env, db, msg) {
     const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
     const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
     const cat = CATALOG[state.data.catKey];
-    const sku = await resolveDonixSku(env, state.data.catKey, state.data.itemId, state.data.itemName);
+    const sku = await resolveDonixSku(env, state.data.catKey, ...validationItemRef(state.data));
     if (!sku) {
       await dropValidating();
       await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
@@ -2202,7 +2217,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     state.data.playerId = text;
     const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
     const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
-    const mlSku = await resolveDonixSku(env, state.data.catKey, state.data.itemId, state.data.itemName);
+    const mlSku = await resolveDonixSku(env, state.data.catKey, ...validationItemRef(state.data));
     if (!mlSku) {
       await dropValidating();
       await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
@@ -2249,7 +2264,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     state.data.serverId = text;
     const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
     const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
-    const mlSku = await resolveDonixSku(env, state.data.catKey, state.data.itemId, state.data.itemName);
+    const mlSku = await resolveDonixSku(env, state.data.catKey, ...validationItemRef(state.data));
     if (!mlSku) {
       await dropValidating();
       await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
