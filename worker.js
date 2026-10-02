@@ -537,6 +537,19 @@ function kvKeyPriceOverride(catKey, itemId) {
 /* Поставьте false, чтобы снова включить покупку Telegram Stars. */
 const STARS_TEMP_DISABLED = true;
 
+/* Техработы Free Fire. По умолчанию ВКЛЮЧЕНЫ; админ переключает командой /ffmaint on | off (без деплоя). */
+const FREEFIRE_MAINTENANCE_DEFAULT = true;
+async function isFreefireMaintenance(db) {
+  const v = await db.get("config:ff_maintenance");
+  if (v === "on") return true;
+  if (v === "off") return false;
+  return FREEFIRE_MAINTENANCE_DEFAULT;
+}
+const MAINTENANCE_TEXT = {
+  ru: "🛠 Сейчас идут технические работы.\nПожалуйста, попробуйте чуть позже.",
+  kg: "🛠 Азыр техникалык иштер жүрүп жатат.\nСураныч, бир аздан кийин кайра аракет кылыңыз.",
+};
+
 function kvKeyStarsPricePerStar() {
   return `config:tgstars_price_per_star`;
 }
@@ -1471,6 +1484,11 @@ async function handleCallbackQuery(env, db, cq) {
         await editMessage(env, chatId, messageId, `${starsInfo}\n\n${t(lang, "enter_username_tg")}`, backHomeKeyboard(lang));
         return answerCallback(env, cq.id);
       }
+      if (catKey === "freefire" && (await isFreefireMaintenance(db))) {
+        await clearCart(db, userId);
+        await editMessage(env, chatId, messageId, MAINTENANCE_TEXT[lang] || MAINTENANCE_TEXT.ru, ikb([[btn(t(lang, "btn_back"), "menu:games")]]));
+        return answerCallback(env, cq.id);
+      }
       let cart = await getCart(db, userId);
       if (!cart || cart.catKey !== catKey) {
         cart = { catKey, items: {} };
@@ -1487,6 +1505,11 @@ async function handleCallbackQuery(env, db, cq) {
       const text = await pricesText(db, lang, catKey);
       await editMessage(env, chatId, messageId, text, pricesKeyboard(lang, catKey));
       return answerCallback(env, cq.id);
+    }
+
+    if ((ns === "cartadd" || ns === "cartnext") && a === "freefire" && (await isFreefireMaintenance(db))) {
+      await answerCallback(env, cq.id, MAINTENANCE_TEXT[lang] || MAINTENANCE_TEXT.ru, true);
+      return;
     }
 
     if (ns === "cartadd") {
@@ -2117,6 +2140,19 @@ async function handleMessage(env, db, msg) {
       await db.put(`skuov:${itemId}`, sku);
       await sendMessage(env, chatId, `✅ ${itemId} → ${sku}`);
     }
+    return;
+  }
+
+  // Admin: /ffmaint on|off  (техработы Free Fire)
+  if (text.startsWith("/ffmaint") && isAdmin(env, userId)) {
+    const arg = (text.split(/\s+/)[1] || "").toLowerCase();
+    if (arg !== "on" && arg !== "off") {
+      const cur = await isFreefireMaintenance(db);
+      await sendMessage(env, chatId, `Техработы Free Fire сейчас: ${cur ? "ВКЛЮЧЕНЫ 🛠" : "выключены ✅"}\n\n/ffmaint on — включить\n/ffmaint off — выключить`);
+      return;
+    }
+    await db.put("config:ff_maintenance", arg);
+    await sendMessage(env, chatId, arg === "on" ? "🛠 Техработы Free Fire ВКЛЮЧЕНЫ. Покупатели видят сообщение." : "✅ Техработы выключены. Free Fire снова доступен.");
     return;
   }
 
