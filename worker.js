@@ -3,7 +3,8 @@
  * KV binding: DB
  * Vars/secrets: BOT_TOKEN, DONIX_API_KEY, DONIX_WEBHOOK_SECRET, ADMIN_ID,
  *   FINIK_API_KEY, FINIK_PRIVATE_KEY, FINIK_PUBLIC_KEY, FINIK_ACCOUNT_ID,
- *   FINIK_ENV ("beta" or "prod"), APP_BASE_URL
+ *   FINIK_ENV ("beta" or "prod"), APP_BASE_URL,
+ *   REVIEWS_CHAT_ID (чат/канал, куда бот публикует выполненные покупки)
  */
 
 import { Signer } from "@mancho.devs/authorizer";
@@ -1848,8 +1849,42 @@ async function handleCallbackQuery(env, db, cq) {
 }
 
 
+/* Публикует в чат отзывов анонимную запись о выполненной покупке:
+   игра, игровой ID, ник и товар. Без Telegram ID и без @username.
+   Нужна переменная REVIEWS_CHAT_ID (ID канала/группы; бот должен быть там админом/участником). */
+async function postPurchaseToReviewsChat(env, db, order) {
+  if (!env.REVIEWS_CHAT_ID) return;
+  try {
+    const first = await idempotentOnce(db, "reviewpost", order.internalId);
+    if (!first) return;
+
+    const cat = CATALOG[order.category];
+    const game = cat ? cat.name : order.category;
+    const d = order.uidData || {};
+    const isTelegram = order.category === "tg_stars" || order.category === "tg_premium";
+
+    const lines = ["✅ <b>Успешная покупка</b>", "", `🎮 ${escHtml(game)}`];
+    // Для Telegram-товаров в данных лежит @username — его не публикуем.
+    if (!isTelegram) {
+      const gameId = d.UID || d["Player ID"];
+      if (gameId) {
+        const idLabel = order.category === "freefire" ? "Free Fire ID" : "ID";
+        lines.push(`🆔 ${idLabel}: <code>${escHtml(gameId)}</code>`);
+      }
+      if (d["Server ID"]) lines.push(`🌐 Server ID: ${escHtml(d["Server ID"])}`);
+      if (d["Ник"] && d["Ник"] !== "—") lines.push(`👤 Ник: ${escHtml(d["Ник"])}`);
+    }
+    lines.push(`🛍 Товар: ${escHtml(order.itemName)}`);
+
+    await sendMessage(env, env.REVIEWS_CHAT_ID, lines.join("\n"));
+  } catch (e) {
+    console.log("postPurchaseToReviewsChat error", String(e));
+  }
+}
+
 /* Final "чек": заказ выполнен + номер, ID, ник, товар. Остаётся в чате, а главное меню открывается ниже. */
 async function sendCompletedReceipt(env, userId, lang, order) {
+  await postPurchaseToReviewsChat(env, env.DB, order);
   // Remove the "Заказ создан / обрабатывается" message so only the receipt stays.
   if (order.processingMsg && order.processingMsg.messageId) {
     await deleteMessage(env, order.processingMsg.chatId || userId, order.processingMsg.messageId);
