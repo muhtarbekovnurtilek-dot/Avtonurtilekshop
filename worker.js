@@ -192,6 +192,8 @@ const T = {
     promo_applied: (d) => `Промокод применён. Скидка: ${d} сом`,
     promo_invalid: "❌ Промокод недействителен.",
     promo_activated: "✅ Промокод активирован",
+    gift_activated: (n) => `🎁 Промокод активирован!\nВам полагается бесплатно: ${n}`,
+    gift_failed: "❌ Не удалось выполнить заказ. Промокод возвращён — попробуйте ввести его снова чуть позже.",
     promo_admin_create_hint:
       "Отправьте промокод в формате:\nCODE;TYPE;VALUE;USES;DAYS;MINSUM\nTYPE = percent или fixed\nПример: SALE10;percent;10;100;30;500",
     lang_choose: "Выберите язык:",
@@ -297,6 +299,8 @@ const T = {
     promo_applied: (d) => `Промокод колдонулду. Арзандатуу: ${d} сом`,
     promo_invalid: "❌ Промокод жараксыз.",
     promo_activated: "✅ Промокод активтештирилди",
+    gift_activated: (n) => `🎁 Промокод активдештирилди!\nСизге акысыз берилет: ${n}`,
+    gift_failed: "❌ Буйрутма аткарылган жок. Промокод кайтарылды — бир аздан кийин кайра киргизип көрүңүз.",
     promo_admin_create_hint:
       "Промокодду форматта жөнөтүңүз:\nCODE;TYPE;VALUE;USES;DAYS;MINSUM\nTYPE = percent же fixed\nМисал: SALE10;percent;10;100;30;500",
     lang_choose: "Тилди тандаңыз:",
@@ -981,8 +985,9 @@ async function walletReserve(db, user, amount) {
 }
 
 async function walletRelease(db, userId, amount, reason) {
-  const user = await getUser(db, userId);
   amount = round2(amount);
+  if (amount <= 0) return; // подарочные заказы (0 сом) нечего возвращать на кошелёк
+  const user = await getUser(db, userId);
   user.balance = round2(user.balance + amount);
   await saveUser(db, user);
   await addWalletHistory(db, userId, { type: "refund", amount, reason });
@@ -1055,6 +1060,8 @@ async function createPromo(db, spec) {
     expiresAt: spec.days ? new Date(Date.now() + Number(spec.days) * 86400000).toISOString() : null,
     createdAt: new Date().toISOString(),
     active: true,
+    // type "gift": промокод даёт конкретный товар бесплатно { catKey, itemId }
+    gift: spec.gift || null,
   };
   await putJSON(db, kvKeyPromo(promo.code), promo);
   return promo;
@@ -1955,8 +1962,9 @@ async function processDonixOrderInner(env, db, order, lang, chatId, isRetry) {
     await saveOrder(db, order);
     const refundOk = await idempotentOnce(db, "refund", order.internalId);
     if (refundOk) await walletRelease(db, order.userId, order.total, `order_failed:${order.orderNumber}`);
+    await restoreGiftPromo(db, order);
     await notifyAdminDonix(env, `заказ №${order.orderNumber} не создан. ${reason}`);
-    await sendMessage(env, chatId, t(lang, "failed"), backHomeKeyboard(lang));
+    await sendMessage(env, chatId, t(lang, order.isGift ? "gift_failed" : "failed"), backHomeKeyboard(lang));
   };
 
   // Cart orders: one Donix order per unit (the API has no quantity field).
@@ -2104,7 +2112,8 @@ async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user
     if (order.status === "completed") {
       await sendCompletedReceipt(env, user.id, lang, order);
     } else {
-      await sendMessage(env, user.id, t(lang, "failed"), backHomeKeyboard(lang));
+      await restoreGiftPromo(db, order);
+      await sendMessage(env, user.id, t(lang, order.isGift ? "gift_failed" : "failed"), backHomeKeyboard(lang));
     }
   } else {
     await saveOrder(db, order);
@@ -2113,8 +2122,110 @@ async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user
 
 /* ================= TEXT MESSAGE HANDLER ================= */
 
+function giftPromoLabel(p) {
+  const base = p.gift ? findItemBase(p.gift.catKey, p.gift.itemId) : null;
+  const cat = p.gift ? CATALOG[p.gift.catKey] : null;
+  return `🎁 ${cat ? cat.name + " — " : ""}${base ? base.name : p.gift ? p.gift.itemId : "?"}`;
+}
+
+/* Возвращает использование подарочного промокода, если заказ не удалось выполнить. */
+async function restoreGiftPromo(db, order) {
+  if (!order || !order.isGift || !order.promoCode) return;
+  const once = await idempotentOnce(db, "giftrestore", order.internalId);
+  if (!once) return;
+  const promo = await getJSON(db, kvKeyPromo(order.promoCode));
+  if (promo && promo.usesLeft !== null) {
+    promo.usesLeft += 1;
+    await putJSON(db, kvKeyPromo(order.promoCode), promo);
+  }
+  await db.delete(kvKeyPromoUse(order.promoCode, order.userId));
+}
+
+/* Пользователь ввёл подарочный промокод: сразу просим игровой ID (оплата не нужна). */
+async function startGiftRedeem(env, db, lang, chatId, userId, promo) {
+  const g = promo.gift;
+  const cat = g ? CATALOG[g.catKey] : null;
+  const item = g ? await findItem(db, g.catKey, g.itemId) : null;
+  if (!cat || !item) {
+    await sendMessage(env, chatId, t(lang, "promo_invalid"), backHomeKeyboard(lang));
+    return;
+  }
+  if (g.catKey === "freefire" && (await isFreefireMaintenance(db))) {
+    await sendMessage(env, chatId, MAINTENANCE_TEXT[lang] || MAINTENANCE_TEXT.ru, backHomeKeyboard(lang));
+    return;
+  }
+  const stateData = {
+    catKey: g.catKey,
+    itemId: g.itemId,
+    itemName: item.name,
+    price: item.price,
+    inputType: cat.inputType,
+    items: [{ itemId: g.itemId, name: item.name, qty: 1, price: item.price, lineTotal: item.price }],
+    giftCode: promo.code,
+  };
+  if (cat.inputType === "ml_id") {
+    await setState(db, userId, { step: "await_ml_player", data: stateData });
+    await sendMessage(env, chatId, `${t(lang, "gift_activated", item.name)}\n\n${t(lang, "enter_player_id_mlbb")}`, backHomeKeyboard(lang));
+  } else {
+    await setState(db, userId, { step: "await_uid", data: stateData });
+    await sendMessage(env, chatId, `${t(lang, "gift_activated", item.name)}\n\n${t(lang, inputPromptKey(cat.inputType, null))}`, backHomeKeyboard(lang));
+  }
+}
+
+/* Подарочный заказ: без оплаты — сразу «оплачен» и уходит в Donix. */
+async function claimGiftOrder(env, db, lang, chatId, userId, order, prompt) {
+  const check = await validatePromo(db, order.promoCode, userId, 0);
+  if (!check.ok) {
+    order.status = "cancelled";
+    await saveOrder(db, order);
+    await sendMessage(env, chatId, t(lang, "promo_invalid"), backHomeKeyboard(lang));
+    return;
+  }
+  const first = await idempotentOnce(db, "giftclaim", order.internalId);
+  if (!first) return;
+  order.isGift = true;
+  order.status = "paid";
+  order.paymentMethod = "gift";
+  await saveOrder(db, order);
+  await consumePromo(db, order.promoCode, userId);
+  const procRes = await sendMessage(
+    env,
+    chatId,
+    `${prompt.text}\n\n${t(lang, "order_created", order.orderNumber)}\n${t(lang, "processing")}`,
+    backHomeKeyboard(lang)
+  );
+  if (procRes && procRes.ok && procRes.result) {
+    order.processingMsg = { chatId, messageId: procRes.result.message_id };
+    await saveOrder(db, order);
+  }
+  await processDonixOrder(env, db, order, lang, chatId);
+}
+
+/* Показывает итог заказа: обычный — с выбором оплаты, подарочный — сразу выдача. */
+async function sendOrderSummary(env, db, lang, chatId, userId, order, prompt) {
+  if (prompt.isGift) return claimGiftOrder(env, db, lang, chatId, userId, order, prompt);
+  await sendMessage(
+    env,
+    chatId,
+    `№ ${order.orderNumber}\n${prompt.text}\n\n${t(lang, "choose_payment_method")}`,
+    paymentMethodKeyboard(lang, order.internalId)
+  );
+}
+
 async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData) {
   const price = stateData.price;
+  if (stateData.giftCode) {
+    const giftLine = lang === "kg" ? "🎁 Промокод боюнча белек" : "🎁 Подарок по промокоду";
+    const text = [
+      Object.entries(uidData)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join("\n"),
+      `${stateData.itemName}`,
+      giftLine,
+      `${t(lang, "total_label")}: 0 ${t(lang, "kg_som")}`,
+    ].join("\n");
+    return { text, total: 0, discount: price, promoCode: stateData.giftCode, isGift: true };
+  }
   let discount = 0;
   let promoCode = null;
   let promoInfo = null;
@@ -2351,10 +2462,7 @@ async function handleMessage(env, db, msg) {
       items: state.data.items,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, `№ ${order.orderNumber}
-${prompt.text}
-
-${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
+    await sendOrderSummary(env, db, lang, chatId, userId, order, prompt);
     return;
   }
 
@@ -2400,10 +2508,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       items: state.data.items,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, `№ ${order.orderNumber}
-${prompt.text}
-
-${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
+    await sendOrderSummary(env, db, lang, chatId, userId, order, prompt);
     return;
   }
 
@@ -2453,10 +2558,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       items: state.data.items,
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, `№ ${order.orderNumber}
-${prompt.text}
-
-${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
+    await sendOrderSummary(env, db, lang, chatId, userId, order, prompt);
     return;
   }
 
@@ -2501,10 +2603,7 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
       items: [{ itemId: "star_unit", name: "1 ⭐ Star", qty: amount, price: pricePerStar }],
     });
     await clearState(db, userId);
-    await sendMessage(env, chatId, `№ ${order.orderNumber}
-${prompt.text}
-
-${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internalId));
+    await sendOrderSummary(env, db, lang, chatId, userId, order, prompt);
     return;
   }
 
@@ -2513,6 +2612,10 @@ ${t(lang, "choose_payment_method")}`, paymentMethodKeyboard(lang, order.internal
     const check = await validatePromo(db, text, userId, 0);
     if (!check.ok) {
       await sendMessage(env, chatId, t(lang, "promo_invalid"), backHomeKeyboard(lang));
+      return;
+    }
+    if (check.promo.type === "gift") {
+      await startGiftRedeem(env, db, lang, chatId, userId, check.promo);
       return;
     }
     // Stored separately from the step-machine state so it isn't lost when the
@@ -2894,6 +2997,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       ikb([
         [btn("♾ Вечный промокод", "admin:promonew:forever")],
         [btn("📅 Промокод на 1 год", "admin:promonew:year")],
+        [btn("🎁 Подарочный (товар бесплатно)", "admin:giftnew")],
         [btn("🛠 Вручную", "admin:promonew:manual")],
         [btn("📋 Список промокодов", "admin:promolist")],
         [btn("⬅️", "admin:home")],
@@ -2925,6 +3029,53 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       ].join("\n"),
       ikb([[btn("⬅️", "admin:promos")]])
     );
+  } else if (a === "giftnew") {
+    await clearState(db, userId);
+    const rows = Object.keys(CATALOG)
+      .filter((k) => CATALOG[k].items.length > 0)
+      .map((k) => [btn(CATALOG_LABELS[k] || k, `admin:giftcat:${k}`)]);
+    rows.push([btn("⬅️", "admin:promos")]);
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "🎁 Подарочный промокод\nПокупатель вводит код, затем свой игровой ID — и получает выбранный товар бесплатно.\n\nВыберите игру:",
+      ikb(rows)
+    );
+  } else if (a === "giftcat") {
+    const catKey = b;
+    if (!CATALOG[catKey]) {
+      await answerCallback(env, cq.id, t(lang, "invalid_input"), true);
+      return;
+    }
+    const items = await getResolvedItems(db, catKey);
+    const rows = items.map((i) => [btn(`${i.name} — ${i.price} сом`, `admin:giftitem:${catKey}:${i.id}`)]);
+    rows.push([btn("⬅️", "admin:giftnew")]);
+    await editMessage(env, chatId, messageId, `${CATALOG_LABELS[catKey] || catKey}\nВыберите товар, который получит покупатель:`, ikb(rows));
+  } else if (a === "giftitem") {
+    const catKey = b;
+    const itemId = c;
+    const base = findItemBase(catKey, itemId);
+    if (!base) {
+      await answerCallback(env, cq.id, t(lang, "invalid_input"), true);
+      return;
+    }
+    await setState(db, userId, { step: "admin_create_gift", data: { catKey, itemId } });
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      [
+        `🎁 Товар: ${CATALOG_LABELS[catKey] || catKey} — ${base.name}`,
+        "",
+        "Отправьте одним сообщением: КОД;КОЛИЧЕСТВО_АКТИВАЦИЙ",
+        "Количество — это сколько всего раз код можно активировать (на всех вместе). Кто успел — тот получил.",
+        "Пример: GIFT1;1  (только 1 активация, достанется первому)",
+        "Пример: FREE5;5  (первые 5 человек)",
+        "Если количество не указать — будет 1.",
+      ].join("\n"),
+      ikb([[btn("⬅️", `admin:giftcat:${catKey}`)]])
+    );
   } else if (a === "promolist") {
     const promoKeys = await db.list({ prefix: "promo:" });
     const lines = ["📋 Промокоды:"];
@@ -2937,7 +3088,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       count++;
       const usesText = p.usesLeft === null ? "∞ (без ограничения)" : `осталось ${p.usesLeft}`;
       const expText = p.expiresAt ? `до ${p.expiresAt.slice(0, 10)}` : "бессрочно";
-      const valText = p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
+      const valText = p.type === "gift" ? giftPromoLabel(p) : p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
       lines.push(`\n${p.active ? "🟢" : "🔴"} ${p.code} — ${valText}\nИспользований: ${usesText}${p.onePerUser ? " (1 на аккаунт)" : ""}\nСрок: ${expText}`);
       rows.push([
         p.active
@@ -2971,7 +3122,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       count++;
       const usesText = p.usesLeft === null ? "∞ (без ограничения)" : `осталось ${p.usesLeft}`;
       const expText = p.expiresAt ? `до ${p.expiresAt.slice(0, 10)}` : "бессрочно";
-      const valText = p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
+      const valText = p.type === "gift" ? giftPromoLabel(p) : p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
       lines.push(`\n${p.active ? "🟢" : "🔴"} ${p.code} — ${valText}\nИспользований: ${usesText}${p.onePerUser ? " (1 на аккаунт)" : ""}\nСрок: ${expText}`);
       rows.push([
         p.active
@@ -3267,6 +3418,39 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
         `Срок действия: ${durationText}`,
         "Использование: по 1 разу на каждый аккаунт, число аккаунтов не ограничено",
       ].join("\n"),
+      adminMainKeyboard()
+    );
+    return;
+  }
+
+  if (state.step === "admin_create_gift") {
+    const parts = text.split(";").map((p) => p.trim());
+    const code = (parts[0] || "").toUpperCase();
+    const uses = parts[1] ? parseInt(parts[1], 10) : 1;
+    if (!/^[A-Z0-9_-]{3,32}$/.test(code) || !Number.isFinite(uses) || uses < 1) {
+      await sendMessage(env, chatId, "Неверный формат. Отправьте: КОД;КОЛИЧЕСТВО\nКод — латиница/цифры, от 3 символов. Пример: GIFT1;1");
+      return;
+    }
+    if (await getJSON(db, kvKeyPromo(code))) {
+      await sendMessage(env, chatId, `Промокод ${code} уже существует. Придумайте другой код.`);
+      return;
+    }
+    const { catKey, itemId } = state.data;
+    const promo = await createPromo(db, {
+      code,
+      type: "gift",
+      value: 0,
+      uses,
+      days: null,
+      minSum: 0,
+      onePerUser: true,
+      gift: { catKey, itemId },
+    });
+    await clearState(db, userId);
+    await sendMessage(
+      env,
+      chatId,
+      ["✅ Подарочный промокод создан", `Код: ${promo.code}`, giftPromoLabel(promo), `Всего активаций: ${uses} (кто успеет — тот получит)`].join("\n"),
       adminMainKeyboard()
     );
     return;
