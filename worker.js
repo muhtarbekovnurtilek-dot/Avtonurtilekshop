@@ -3478,6 +3478,11 @@ async function routeTelegramWebhook(env, db, request) {
     if (update.callback_query) {
       await handleCallbackQuery(env, db, update.callback_query);
     } else if (update.message) {
+      // Бот отвечает только в личных чатах. В группах/каналах (в т.ч. в чате отзывов)
+      // он молчит на любые сообщения и команды — туда он только сам публикует выполненные заказы.
+      if (update.message.chat && update.message.chat.type !== "private") {
+        return new Response("ok", { status: 200 });
+      }
       await handleMessage(env, db, update.message);
     }
   } catch (err) {
