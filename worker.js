@@ -170,6 +170,7 @@ const T = {
     validating: "⏳ Проверяю данные...",
     service_unavailable: "⚠️ Сервис временно недоступен. Попробуйте позже.",
     invalid_input: "❌ Неверные данные. Проверьте и попробуйте снова.",
+    invalid_game_id: "❌ Неверный ID.\n\nЗайдите в игру и проверьте, правильно ли вы вводите свой ID.\nИли это другой регион.\n\nОтправьте ID ещё раз:",
     order_created: (n) => `Заказ создан.\nНомер заказа: ${n}`,
     price_label: "Цена",
     discount_label: "Скидка",
@@ -277,6 +278,7 @@ const T = {
     validating: "⏳ Текшерилүүдө...",
     service_unavailable: "⚠️ Кызмат убактылуу жеткиликсиз. Кийинчерээк аракет кылыңыз.",
     invalid_input: "❌ Туура эмес маалымат. Кайра аракет кылыңыз.",
+    invalid_game_id: "❌ ID туура эмес.\n\nОюнга кирип, ID'ңизди туура киргизип жатканыңызды текшериңиз.\nЖе бул башка регион.\n\nID'ни кайра жөнөтүңүз:",
     order_created: (n) => `Буйрутма түзүлдү.\nБуйрутма номери: ${n}`,
     price_label: "Баасы",
     discount_label: "Арзандатуу",
@@ -367,6 +369,7 @@ function walletHistoryTypeLabel(lang, type) {
 
 const CATALOG = {
   freefire: {
+    validateNick: true,
     name: "Free Fire",
     inputType: "uid",
     donixCategory: "freefire",
@@ -385,6 +388,7 @@ const CATALOG = {
     ],
   },
   pubg_uc: {
+    validateNick: true,
     name: "PUBG Mobile — UC",
     inputType: "pubg_id",
     donixCategory: "pubg",
@@ -398,6 +402,7 @@ const CATALOG = {
     ],
   },
   pubg_prime: {
+    validateNick: true,
     name: "PUBG Mobile — Prime",
     inputType: "pubg_id",
     donixCategory: "pubg",
@@ -409,6 +414,7 @@ const CATALOG = {
     ],
   },
   pubg_primeplus: {
+    validateNick: true,
     name: "PUBG Mobile — Prime+",
     inputType: "pubg_id",
     donixCategory: "pubg",
@@ -2423,29 +2429,41 @@ async function handleMessage(env, db, msg) {
       await sendMessage(env, chatId, t(lang, "invalid_input"));
       return;
     }
-    const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
-    const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
     const cat = CATALOG[state.data.catKey];
-    const sku = await resolveDonixSku(env, state.data.catKey, ...validationItemRef(state.data));
-    if (!sku) {
+    let uidData;
+    if (cat && cat.validateNick) {
+      // Free Fire и PUBG Mobile: проверяем ID через Donix и показываем ник.
+      const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
+      const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
+      const sku = await resolveDonixSku(env, state.data.catKey, ...validationItemRef(state.data));
+      if (!sku) {
+        await dropValidating();
+        await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
+        await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+        await clearState(db, userId);
+        return;
+      }
+      const validation = await donixValidate(env, { sku, uid });
       await dropValidating();
-      await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
-      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
-      await clearState(db, userId);
-      return;
+      const st = validation.status;
+      // Сервис реально недоступен: сеть, 5xx, проблемы с ключом/лимитами.
+      const serviceDown = !validation.ok && (st === 0 || st >= 500 || st === 401 || st === 403 || st === 429);
+      if (serviceDown) {
+        if (st === 401 || st === 403) await notifyAdminDonix(env, `проверка ID: ${donixErrText(validation)}`);
+        await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+        await clearState(db, userId);
+        return;
+      }
+      // Всё остальное (4xx или valid:false) — игрок с таким ID не найден.
+      if (!validation.ok || !validation.data || validation.data.valid === false) {
+        await sendMessage(env, chatId, t(lang, "invalid_game_id"), ikb([[btn(t(lang, "btn_home"), "menu:home")]]));
+        return; // состояние сохраняем: можно сразу отправить ID ещё раз
+      }
+      uidData = { UID: uid, "Ник": validation.data.player_name || validation.data.nickname || validation.data.name || "—" };
+    } else {
+      // Остальные игры и Telegram: без проверки ника.
+      uidData = cat && cat.inputType === "tg_username" ? { Username: uid } : { UID: uid };
     }
-    const validation = await donixValidate(env, { sku, uid });
-    await dropValidating();
-    if (!validation.ok) {
-      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
-      await clearState(db, userId);
-      return;
-    }
-    if (!validation.data || validation.data.valid === false) {
-      await sendMessage(env, chatId, t(lang, (cat && cat.invalidKey) || "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `cat:${state.data.catKey}`)]]));
-      return;
-    }
-    const uidData = { UID: uid, "Ник": validation.data.player_name || validation.data.nickname || validation.data.name || "—" };
     state.data.uidData = uidData;
     await setState(db, userId, state);
     const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, state.data, uidData);
@@ -2469,80 +2487,27 @@ async function handleMessage(env, db, msg) {
   // Mobile Legends: first try to find the player by Player ID alone. If Donix returns a
   // nickname, the Server ID is not asked. Otherwise fall back to asking for the Server ID.
   if (state.step === "await_ml_player") {
+    if (!text || text.length < 2) {
+      await sendMessage(env, chatId, t(lang, "invalid_input"));
+      return;
+    }
+    // Mobile Legends: ник не проверяем — просто просим Server ID.
     state.data.playerId = text;
-    const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
-    const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
-    const mlSku = await resolveDonixSku(env, state.data.catKey, ...validationItemRef(state.data));
-    if (!mlSku) {
-      await dropValidating();
-      await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
-      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
-      await clearState(db, userId);
-      return;
-    }
-    const validation = await donixValidate(env, { sku: mlSku, uid: state.data.playerId });
-    await dropValidating();
-    const foundNick =
-      validation.ok && validation.data && validation.data.valid !== false
-        ? validation.data.player_name || validation.data.nickname || validation.data.name || null
-        : null;
-    if (!foundNick) {
-      // not found without a server -> ask for the Server ID
-      state.step = "await_ml_server";
-      await setState(db, userId, state);
-      await sendMessage(env, chatId, t(lang, "enter_server_id_mlbb"));
-      return;
-    }
-    const uidData = { "Player ID": state.data.playerId, "Ник": foundNick };
-    const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, state.data, uidData);
-    const order = await createOrder(db, {
-      userId,
-      category: state.data.catKey,
-      itemId: state.data.itemId,
-      itemName: state.data.itemName,
-      price: state.data.price,
-      discount: prompt.discount,
-      total: prompt.total,
-      uidData,
-      promoCode: prompt.promoCode,
-      items: state.data.items,
-    });
-    await clearState(db, userId);
-    await sendOrderSummary(env, db, lang, chatId, userId, order, prompt);
+    state.step = "await_ml_server";
+    await setState(db, userId, state);
+    await sendMessage(env, chatId, t(lang, "enter_server_id_mlbb"));
     return;
   }
 
   if (state.step === "await_ml_server") {
+    if (!text || text.length < 1) {
+      await sendMessage(env, chatId, t(lang, "invalid_input"));
+      return;
+    }
     state.data.serverId = text;
-    const validatingMsg = await sendMessage(env, chatId, t(lang, "validating"));
-    const dropValidating = () => deleteMessage(env, chatId, validatingMsg && validatingMsg.result && validatingMsg.result.message_id);
-    const mlSku = await resolveDonixSku(env, state.data.catKey, ...validationItemRef(state.data));
-    if (!mlSku) {
-      await dropValidating();
-      await notifyAdminDonix(env, `не найден SKU для «${state.data.itemName}» (${state.data.itemId}). Используйте /setsku ${state.data.itemId} SKU`);
-      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
-      await clearState(db, userId);
-      return;
-    }
-    const validation = await donixValidate(env, {
-      sku: mlSku,
-      uid: state.data.playerId,
-      server: state.data.serverId,
-    });
-    await dropValidating();
-    if (!validation.ok) {
-      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
-      await clearState(db, userId);
-      return;
-    }
-    if (!validation.data || validation.data.valid === false) {
-      await sendMessage(env, chatId, t(lang, "invalid_input"), ikb([[btn(t(lang, "btn_retry"), `cat:${state.data.catKey}`)]]));
-      return;
-    }
     const uidData = {
       "Player ID": state.data.playerId,
       "Server ID": state.data.serverId,
-      "Ник": validation.data.player_name || validation.data.nickname || "—",
     };
     const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, state.data, uidData);
     const order = await createOrder(db, {
