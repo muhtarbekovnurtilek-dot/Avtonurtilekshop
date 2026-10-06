@@ -2446,20 +2446,25 @@ async function handleMessage(env, db, msg) {
       const validation = await donixValidate(env, { sku, uid });
       await dropValidating();
       const st = validation.status;
-      // Сервис реально недоступен: сеть, 5xx, проблемы с ключом/лимитами.
-      const serviceDown = !validation.ok && (st === 0 || st >= 500 || st === 401 || st === 403 || st === 429);
+      // Сервис недоступен только при сетевой ошибке, проблемах с ключом или лимитах.
+      // Ошибки 5xx на проверке ID считаем «ID неверный» (Donix так отвечает на несуществующий ID).
+      const serviceDown = !validation.ok && (st === 0 || st === 401 || st === 403 || st === 429);
       if (serviceDown) {
         if (st === 401 || st === 403) await notifyAdminDonix(env, `проверка ID: ${donixErrText(validation)}`);
         await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
         await clearState(db, userId);
         return;
       }
-      // Всё остальное (4xx или valid:false) — игрок с таким ID не найден.
-      if (!validation.ok || !validation.data || validation.data.valid === false) {
+      // Если Donix не вернул ник — считаем, что ID неверный.
+      const playerNick =
+        validation.ok && validation.data && validation.data.valid !== false
+          ? validation.data.player_name || validation.data.nickname || validation.data.name || null
+          : null;
+      if (!playerNick) {
         await sendMessage(env, chatId, t(lang, "invalid_game_id"), ikb([[btn(t(lang, "btn_home"), "menu:home")]]));
         return; // состояние сохраняем: можно сразу отправить ID ещё раз
       }
-      uidData = { UID: uid, "Ник": validation.data.player_name || validation.data.nickname || validation.data.name || "—" };
+      uidData = { UID: uid, "Ник": playerNick };
     } else {
       // Остальные игры и Telegram: без проверки ника.
       uidData = cat && cat.inputType === "tg_username" ? { Username: uid } : { UID: uid };
