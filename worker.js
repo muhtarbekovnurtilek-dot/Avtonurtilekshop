@@ -2310,12 +2310,52 @@ async function handleMessage(env, db, msg) {
       await sendMessage(env, chatId, "Формат: /closeorder НОМЕР_ЗАКАЗА\nЗакрывает заказ, который вы выдали вручную.");
       return;
     }
+    if (o.status === "completed") {
+      await sendMessage(env, chatId, `Заказ №${o.orderNumber} уже выполнен.`);
+      return;
+    }
+    if (o.status === "pending_payment" || o.status === "cancelled") {
+      await sendMessage(env, chatId, `Заказ №${o.orderNumber} в статусе «${o.status}» — он не оплачен, закрывать нельзя.`);
+      return;
+    }
     o.status = "completed";
     o.closedManually = true;
     if (o.items) o.items.forEach((l) => (l.status = "completed"));
     await saveOrder(db, o);
     await idempotentOnce(db, "donixcreate", o.internalId); // block any later auto-send
-    await sendMessage(env, chatId, `✅ Заказ №${o.orderNumber} закрыт как выполненный вручную. В Donix ничего не отправлено.`);
+    // Покупателю уходит тот же чек «✅ Заказ успешно выполнен», что и при автовыдаче
+    // (+ публикация в чат отзывов, если задан REVIEWS_CHAT_ID).
+    const buyer = await getUser(db, o.userId);
+    await sendCompletedReceipt(env, o.userId, buyer.lang || "ru", o);
+    await sendMessage(env, chatId, `✅ Заказ №${o.orderNumber} закрыт как выполненный вручную. Покупателю отправлено «Заказ выполнен». В Donix ничего не отправлено.`);
+    return;
+  }
+
+  // Admin: /msg USER_ID текст  (бот пишет одному человеку от своего имени)
+  if (text.startsWith("/msg") && isAdmin(env, userId)) {
+    const m = text.match(/^\/msg(?:@\w+)?\s+(\d+)\s+([\s\S]+)$/);
+    if (!m) {
+      await sendMessage(env, chatId, "Формат: /msg TELEGRAM_ID текст\nНапример: /msg 123456789 Ваш заказ выдан, спасибо!");
+      return;
+    }
+    const r = await sendMessage(env, m[1], escHtml(m[2]));
+    await sendMessage(env, chatId, r && r.ok ? `✅ Отправлено пользователю ${m[1]}.` : `❌ Не удалось отправить (пользователь не запускал бота или заблокировал его).`);
+    return;
+  }
+
+  // Admin: /post текст  (бот публикует ваш отзыв/сообщение в чат отзывов от своего имени)
+  if (text.startsWith("/post") && isAdmin(env, userId)) {
+    const body = text.replace(/^\/post(?:@\w+)?\s*/, "");
+    if (!body) {
+      await sendMessage(env, chatId, "Формат: /post текст\nБот опубликует текст в чате отзывов от своего имени.");
+      return;
+    }
+    if (!env.REVIEWS_CHAT_ID) {
+      await sendMessage(env, chatId, "❌ Не задана переменная REVIEWS_CHAT_ID.");
+      return;
+    }
+    const r = await sendMessage(env, env.REVIEWS_CHAT_ID, escHtml(body));
+    await sendMessage(env, chatId, r && r.ok ? "✅ Опубликовано в чате отзывов." : "❌ Не удалось опубликовать (бот должен быть в чате и иметь право писать).");
     return;
   }
 
