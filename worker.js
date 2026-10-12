@@ -712,13 +712,32 @@ async function tgCall(env, method, payload) {
   return data;
 }
 
+function stripHtmlTags(text) {
+  return String(text)
+    .replace(/<\/?(b|i|u|s|em|strong|code|pre|a|tg-spoiler|blockquote)(\s[^>]*)?>/gi, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&");
+}
+
 async function sendMessage(env, chatId, text, replyMarkup) {
-  return tgCall(env, "sendMessage", {
+  const res = await tgCall(env, "sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
     reply_markup: replyMarkup,
   });
+  // Ник игрока с символами < > & ломает HTML-разметку, и Telegram не доставляет сообщение.
+  // Тогда повторяем отправку обычным текстом, чтобы клиент всегда получил ответ.
+  if (!res.ok && /parse entities|unsupported start tag|can't find end tag/i.test(res.description || "")) {
+    return tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: stripHtmlTags(text),
+      reply_markup: replyMarkup,
+    });
+  }
+  return res;
 }
 
 async function editMessage(env, chatId, messageId, text, replyMarkup) {
@@ -2260,12 +2279,18 @@ async function claimGiftOrder(env, db, lang, chatId, userId, order, prompt) {
 /* Показывает итог заказа: обычный — с выбором оплаты, подарочный — сразу выдача. */
 async function sendOrderSummary(env, db, lang, chatId, userId, order, prompt) {
   if (prompt.isGift) return claimGiftOrder(env, db, lang, chatId, userId, order, prompt);
-  await sendMessage(
+  const sent = await sendMessage(
     env,
     chatId,
     `№ ${order.orderNumber}\n${prompt.text}\n\n${t(lang, "choose_payment_method")}`,
     paymentMethodKeyboard(lang, order.internalId)
   );
+  if (!sent || !sent.ok) {
+    // Клиент не увидел заказ — не оставляем «висящий» неоплаченный заказ в админке.
+    order.status = "cancelled";
+    await saveOrder(db, order);
+    await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+  }
 }
 
 async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData) {
@@ -2274,7 +2299,7 @@ async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData
     const giftLine = lang === "kg" ? "🎁 Промокод боюнча белек" : "🎁 Подарок по промокоду";
     const text = [
       Object.entries(uidData)
-        .map(([k, v]) => `${k}: ${v}`)
+        .map(([k, v]) => `${k}: ${escHtml(v)}`)
         .join("\n"),
       `${stateData.itemName}`,
       giftLine,
@@ -2300,7 +2325,7 @@ async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData
   const total = round2(price - discount);
   const lines = [
     Object.entries(uidData)
-      .map(([k, v]) => `${k}: ${v}`)
+      .map(([k, v]) => `${k}: ${escHtml(v)}`)
       .join("\n"),
     `${stateData.itemName}`,
     `${t(lang, "price_label")}: ${fmtSom(price)} ${t(lang, "kg_som")}`,
