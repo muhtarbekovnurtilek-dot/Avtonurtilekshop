@@ -1068,12 +1068,30 @@ async function createPromo(db, spec) {
     active: true,
     // type "gift": промокод даёт конкретный товар бесплатно { catKey, itemId }
     gift: spec.gift || null,
+    // type "prices": промокод действует на ОДНУ игру и задаёт свои цены за единицу товара:
+    // catKey — игра, prices — { [itemId]: цена_по_промокоду }. Товары без цены не меняются.
+    catKey: spec.catKey || null,
+    prices: spec.prices || null,
   };
   await putJSON(db, kvKeyPromo(promo.code), promo);
   return promo;
 }
 
-async function validatePromo(db, code, userId, sum) {
+/* Скидка промокода типа "prices": разница между обычной и промо-ценой по строкам корзины
+   (только для той игры, на которую выпущен промокод). */
+function promoPricesDiscount(promo, ctx) {
+  if (!promo || !promo.prices || !ctx || ctx.catKey !== promo.catKey || !Array.isArray(ctx.lines)) return 0;
+  let d = 0;
+  for (const l of ctx.lines) {
+    const pp = promo.prices[l.itemId];
+    if (pp === undefined || pp === null) continue;
+    const diff = Number(l.price) - Number(pp);
+    if (diff > 0) d += diff * (l.qty || 1);
+  }
+  return round2(d);
+}
+
+async function validatePromo(db, code, userId, sum, ctx) {
   const promo = await getJSON(db, kvKeyPromo(code));
   if (!promo || !promo.active) return { ok: false, reason: "not_found" };
   if (promo.expiresAt && new Date(promo.expiresAt).getTime() < Date.now()) {
@@ -1090,7 +1108,12 @@ async function validatePromo(db, code, userId, sum) {
     const orders = (await getJSON(db, kvKeyUserOrders(userId), [])) || [];
     if (orders.length > 0) return { ok: false, reason: "not_first_purchase" };
   }
-  let discount = promo.type === "percent" ? round2((sum * promo.value) / 100) : round2(promo.value);
+  let discount =
+    promo.type === "prices"
+      ? promoPricesDiscount(promo, ctx)
+      : promo.type === "percent"
+        ? round2((sum * promo.value) / 100)
+        : round2(promo.value);
   if (discount > sum) discount = round2(sum);
   return { ok: true, promo, discount };
 }
@@ -1288,13 +1311,32 @@ async function cartText(db, lang, catKey, cart) {
 }
 
 /* Plain-text price list: each item on its own line, price written at the end. */
-async function pricesText(db, lang, catKey) {
+async function pricesText(db, lang, catKey, userId) {
   const cat = CATALOG[catKey];
   if (!cat) return t(lang, "prices_title");
   const items = await getResolvedItems(db, catKey);
+
+  // Если у пользователя активирован промокод с особыми ценами на ЭТУ игру — показываем цены по промокоду.
+  let promo = null;
+  if (userId) {
+    const activeCode = await db.get(kvKeyActivePromo(userId));
+    if (activeCode) {
+      const check = await validatePromo(db, activeCode, userId, 0, null);
+      if (check.ok && check.promo.type === "prices" && check.promo.catKey === catKey) promo = check.promo;
+    }
+  }
+
   const lines = [t(lang, "prices_title"), ""];
+  if (promo) {
+    lines.push(lang === "kg" ? `🎟 Промокод ${promo.code} — арзандатылган баалар` : `🎟 Промокод ${promo.code} — цены со скидкой`, "");
+  }
   for (const i of items) {
-    lines.push(`🔹 <b>${i.name} = ${i.price} ${t(lang, "kg_som")}</b>`);
+    const pp = promo && promo.prices ? promo.prices[i.id] : undefined;
+    if (pp !== undefined && pp !== null && Number(pp) < i.price) {
+      lines.push(`🔹 <b>${i.name} = ${fmtSom(pp)} ${t(lang, "kg_som")}</b> <s>${fmtSom(i.price)}</s>`);
+    } else {
+      lines.push(`🔹 <b>${i.name} = ${i.price} ${t(lang, "kg_som")}</b>`);
+    }
   }
   return lines.join("\n");
 }
@@ -1510,7 +1552,7 @@ async function handleCallbackQuery(env, db, cq) {
 
     if (ns === "prices") {
       const catKey = a;
-      const text = await pricesText(db, lang, catKey);
+      const text = await pricesText(db, lang, catKey, userId);
       await editMessage(env, chatId, messageId, text, pricesKeyboard(lang, catKey));
       return answerCallback(env, cq.id);
     }
@@ -2134,6 +2176,14 @@ function giftPromoLabel(p) {
   return `🎁 ${cat ? cat.name + " — " : ""}${base ? base.name : p.gift ? p.gift.itemId : "?"}`;
 }
 
+function promoValText(p) {
+  if (p.type === "gift") return giftPromoLabel(p);
+  if (p.type === "prices") {
+    return `💲 ${(CATALOG[p.catKey] || {}).name || p.catKey} (особые цены, товаров: ${Object.keys(p.prices || {}).length})`;
+  }
+  return p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
+}
+
 /* Возвращает использование подарочного промокода, если заказ не удалось выполнить. */
 async function restoreGiftPromo(db, order) {
   if (!order || !order.isGift || !order.promoCode) return;
@@ -2239,8 +2289,9 @@ async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData
   // so it survives moving between menus/categories while the user picks a product.
   const activeCode = await db.get(kvKeyActivePromo(userId));
   if (activeCode) {
-    const check = await validatePromo(db, activeCode, userId, price);
-    if (check.ok) {
+    const check = await validatePromo(db, activeCode, userId, price, { catKey: stateData.catKey, lines: stateData.items });
+    // Промокод с особыми ценами применяется только если реально что-то удешевляет (иначе не тратим его).
+    if (check.ok && !(check.promo.type === "prices" && check.discount <= 0)) {
       discount = check.discount;
       promoCode = activeCode;
       promoInfo = check.promo;
@@ -2632,9 +2683,15 @@ async function handleMessage(env, db, msg) {
     // user goes on to browse categories/products before checking out.
     await db.put(kvKeyActivePromo(userId), text.toUpperCase());
     const valueLine =
-      check.promo.type === "percent"
-        ? `${t(lang, "discount_label")}: ${fmtPercent(check.promo.value)}%`
-        : `${t(lang, "discount_label")}: ${fmtSom(check.promo.value)} ${t(lang, "kg_som")}`;
+      check.promo.type === "prices"
+        ? `${lang === "kg" ? "Атайын баалар" : "Особые цены"}: ${(CATALOG[check.promo.catKey] || {}).name || check.promo.catKey}\n${
+            lang === "kg"
+              ? "Баасын «Баалар» баскычынан көрүңүз 💰"
+              : "Посмотреть цены можно в разделе игры, кнопка «💰 Цены»"
+          }`
+        : check.promo.type === "percent"
+          ? `${t(lang, "discount_label")}: ${fmtPercent(check.promo.value)}%`
+          : `${t(lang, "discount_label")}: ${fmtSom(check.promo.value)} ${t(lang, "kg_som")}`;
     await sendMessage(
       env,
       chatId,
@@ -2871,6 +2928,25 @@ async function adminOrdersView(db, page, filter) {
   return { text: lines.join("\n"), keyboard: ikb(rows) };
 }
 
+/* Экран создания промокода с ценами: список товаров игры, обычная и промо-цена. */
+async function adminPricePromoView(db, data) {
+  const items = await getResolvedItems(db, data.catKey);
+  const lines = [
+    `💲 Промокод ${data.code} — ${CATALOG_LABELS[data.catKey] || data.catKey}`,
+    "Нажмите на товар, чтобы задать цену по промокоду. Товары без цены остаются по обычной цене.",
+    "",
+  ];
+  const rows = [];
+  for (const i of items) {
+    const pp = data.prices[i.id];
+    lines.push(`${i.name}: ${i.price} сом → ${pp !== undefined ? pp + " сом" : "без изменений"}`);
+    rows.push([btn(`${i.name} — ${pp !== undefined ? pp : i.price} сом${pp !== undefined ? " ✏️" : ""}`, `admin:priceitem:${i.id}`)]);
+  }
+  rows.push([btn("✅ Создать промокод", "admin:pricedone")]);
+  rows.push([btn("⬅️", "admin:pricenew")]);
+  return { text: lines.join("\n"), keyboard: ikb(rows) };
+}
+
 const ADMIN_WALLETS_PER_PAGE = 10;
 
 /* Every user (follows KV cursors; one list() call returns at most 1000 keys). */
@@ -3008,6 +3084,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
         [btn("♾ Вечный промокод", "admin:promonew:forever")],
         [btn("📅 Промокод на 1 год", "admin:promonew:year")],
         [btn("🎁 Подарочный (товар бесплатно)", "admin:giftnew")],
+        [btn("💲 Промокод с ценами на игру", "admin:pricenew")],
         [btn("🛠 Вручную", "admin:promonew:manual")],
         [btn("📋 Список промокодов", "admin:promolist")],
         [btn("⬅️", "admin:home")],
@@ -3039,6 +3116,100 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       ].join("\n"),
       ikb([[btn("⬅️", "admin:promos")]])
     );
+  } else if (a === "pricenew") {
+    await clearState(db, userId);
+    const rows = Object.keys(CATALOG)
+      .filter((k) => CATALOG[k].items.length > 0)
+      .map((k) => [btn(CATALOG_LABELS[k] || k, `admin:pricecat:${k}`)]);
+    rows.push([btn("⬅️", "admin:promos")]);
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "💲 Промокод с ценами на игру\nПромокод работает только в одной игре и ставит свои цены на выбранные товары. После использования он пропадает у покупателя, и цены снова обычные.\n\nВыберите игру:",
+      ikb(rows)
+    );
+  } else if (a === "pricecat") {
+    const catKey = b;
+    if (!CATALOG[catKey] || CATALOG[catKey].items.length === 0) {
+      await answerCallback(env, cq.id, t(lang, "invalid_input"), true);
+      return;
+    }
+    await setState(db, userId, { step: "admin_pricepromo_code", data: { catKey } });
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      [
+        `💲 Игра: ${CATALOG_LABELS[catKey] || catKey}`,
+        "",
+        "Отправьте одним сообщением: КОД;КОЛИЧЕСТВО_АКТИВАЦИЙ",
+        "Пример: PRICE1;50  (50 человек смогут использовать)",
+        "Если количество не указать — без ограничения (каждый аккаунт по 1 разу).",
+      ].join("\n"),
+      ikb([[btn("⬅️", "admin:pricenew")]])
+    );
+  } else if (a === "priceitem") {
+    const state = await getState(db, userId);
+    if (state.step !== "admin_pricepromo_items" && state.step !== "admin_pricepromo_setprice") {
+      await answerCallback(env, cq.id, "Сессия создания истекла. Начните заново.", true);
+      return;
+    }
+    const base = findItemBase(state.data.catKey, b);
+    if (!base) {
+      await answerCallback(env, cq.id, t(lang, "invalid_input"), true);
+      return;
+    }
+    const current = await getEffectivePrice(db, state.data.catKey, b, base.price);
+    state.step = "admin_pricepromo_setprice";
+    state.data.itemId = b;
+    await setState(db, userId, state);
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      `${base.name}\nОбычная цена: ${current} сом\nЦена по промокоду: ${state.data.prices[b] !== undefined ? state.data.prices[b] + " сом" : "не задана"}\n\nОтправьте цену по промокоду (число в сомах). Отправьте «-», чтобы убрать особую цену.`,
+      ikb([[btn("⬅️", "admin:priceback")]])
+    );
+  } else if (a === "priceback") {
+    const state = await getState(db, userId);
+    if (state.step !== "admin_pricepromo_items" && state.step !== "admin_pricepromo_setprice") {
+      await answerCallback(env, cq.id, "Сессия создания истекла. Начните заново.", true);
+      return;
+    }
+    state.step = "admin_pricepromo_items";
+    delete state.data.itemId;
+    await setState(db, userId, state);
+    const view = await adminPricePromoView(db, state.data);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "pricedone") {
+    const state = await getState(db, userId);
+    if (state.step !== "admin_pricepromo_items" && state.step !== "admin_pricepromo_setprice") {
+      await answerCallback(env, cq.id, "Сессия создания истекла. Начните заново.", true);
+      return;
+    }
+    const { catKey, code, uses, prices } = state.data;
+    if (Object.keys(prices).length === 0) {
+      await answerCallback(env, cq.id, "Задайте цену хотя бы для одного товара.", true);
+      return;
+    }
+    if (await getJSON(db, kvKeyPromo(code))) {
+      await answerCallback(env, cq.id, `Промокод ${code} уже существует.`, true);
+      return;
+    }
+    const promo = await createPromo(db, {
+      code,
+      type: "prices",
+      value: 0,
+      uses: uses === null || uses === undefined ? null : uses,
+      days: null,
+      minSum: 0,
+      onePerUser: true,
+      catKey,
+      prices,
+    });
+    await clearState(db, userId);
+    await editMessage(env, chatId, messageId, ["✅ Промокод с ценами создан", `Код: ${promo.code}`, promoValText(promo), uses ? `Активаций: ${uses}` : "Активаций: без ограничения (по 1 на аккаунт)"].join("\n"), adminMainKeyboard());
   } else if (a === "giftnew") {
     await clearState(db, userId);
     const rows = Object.keys(CATALOG)
@@ -3098,7 +3269,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       count++;
       const usesText = p.usesLeft === null ? "∞ (без ограничения)" : `осталось ${p.usesLeft}`;
       const expText = p.expiresAt ? `до ${p.expiresAt.slice(0, 10)}` : "бессрочно";
-      const valText = p.type === "gift" ? giftPromoLabel(p) : p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
+      const valText = promoValText(p);
       lines.push(`\n${p.active ? "🟢" : "🔴"} ${p.code} — ${valText}\nИспользований: ${usesText}${p.onePerUser ? " (1 на аккаунт)" : ""}\nСрок: ${expText}`);
       rows.push([
         p.active
@@ -3132,7 +3303,7 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       count++;
       const usesText = p.usesLeft === null ? "∞ (без ограничения)" : `осталось ${p.usesLeft}`;
       const expText = p.expiresAt ? `до ${p.expiresAt.slice(0, 10)}` : "бессрочно";
-      const valText = p.type === "gift" ? giftPromoLabel(p) : p.type === "percent" ? `-${p.value}%` : `-${p.value} сом`;
+      const valText = promoValText(p);
       lines.push(`\n${p.active ? "🟢" : "🔴"} ${p.code} — ${valText}\nИспользований: ${usesText}${p.onePerUser ? " (1 на аккаунт)" : ""}\nСрок: ${expText}`);
       rows.push([
         p.active
@@ -3430,6 +3601,49 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
       ].join("\n"),
       adminMainKeyboard()
     );
+    return;
+  }
+
+  if (state.step === "admin_pricepromo_code") {
+    const parts = text.split(";").map((p) => p.trim());
+    const code = (parts[0] || "").toUpperCase();
+    const uses = parts[1] ? parseInt(parts[1], 10) : null;
+    if (!/^[A-Z0-9_-]{3,32}$/.test(code) || (parts[1] && (!Number.isFinite(uses) || uses < 1))) {
+      await sendMessage(env, chatId, "Неверный формат. Отправьте: КОД;КОЛИЧЕСТВО\nКод — латиница/цифры, от 3 символов. Пример: PRICE1;50");
+      return;
+    }
+    if (await getJSON(db, kvKeyPromo(code))) {
+      await sendMessage(env, chatId, `Промокод ${code} уже существует. Придумайте другой код.`);
+      return;
+    }
+    const data = { catKey: state.data.catKey, code, uses, prices: {} };
+    await setState(db, userId, { step: "admin_pricepromo_items", data });
+    const view = await adminPricePromoView(db, data);
+    await sendMessage(env, chatId, view.text, view.keyboard);
+    return;
+  }
+
+  if (state.step === "admin_pricepromo_items") {
+    await sendMessage(env, chatId, "Нажмите на товар в списке выше, чтобы задать цену, или «✅ Создать промокод».");
+    return;
+  }
+
+  if (state.step === "admin_pricepromo_setprice") {
+    const data = state.data;
+    if (text === "-") {
+      delete data.prices[data.itemId];
+    } else {
+      const value = Number(text.replace(",", "."));
+      if (!Number.isFinite(value) || value < 0) {
+        await sendMessage(env, chatId, "Неверная цена. Отправьте число, например: 70");
+        return;
+      }
+      data.prices[data.itemId] = value;
+    }
+    delete data.itemId;
+    await setState(db, userId, { step: "admin_pricepromo_items", data });
+    const view = await adminPricePromoView(db, data);
+    await sendMessage(env, chatId, view.text, view.keyboard);
     return;
   }
 
