@@ -1287,7 +1287,8 @@ function starsQuickKeyboard(lang) {
   for (let i = 0; i < q.length; i += 3) {
     rows.push(q.slice(i, i + 3).map((n) => btn(`${n} ⭐`, `stars:${n}`)));
   }
-  rows.push([btn(t(lang, "btn_home"), "menu:home")]);
+  rows.push([btn(lang === "kg" ? "✏️ Өз санымды жазам" : "✏️ Своё количество", "stars:custom")]);
+  rows.push([btn(t(lang, "btn_back"), "menu:tg")]);
   return ikb(rows);
 }
 
@@ -1575,15 +1576,19 @@ async function handleCallbackQuery(env, db, cq) {
     }
 
     if (ns === "stars") {
-      const st = await getState(db, userId);
-      const amount = parseInt(a, 10);
       const cat = CATALOG.tg_stars;
-      if (!st || st.step !== "await_stars_amount" || !st.data || !st.data.username || !cat.quick.includes(amount)) {
-        await clearState(db, userId);
-        await editMessage(env, chatId, messageId, t(lang, "main_menu"), mainMenuKeyboard(lang));
+      if (a === "custom") {
+        await setState(db, userId, { step: "await_stars_custom", data: {} });
+        const txt = lang === "kg"
+          ? `Stars санын жазыңыз (${cat.min}дөн ${cat.max} чейин):`
+          : `Напишите количество Stars (от ${cat.min} до ${cat.max}):`;
+        await editMessage(env, chatId, messageId, txt, ikb([[btn(t(lang, "btn_back"), "cat:tg_stars")]]));
         return answerCallback(env, cq.id);
       }
-      await createStarsOrder(env, db, lang, chatId, userId, st.data.username, amount);
+      const amount = parseInt(a, 10);
+      if (!cat.quick.includes(amount)) return answerCallback(env, cq.id);
+      await setState(db, userId, { step: "await_stars_username", data: { amount } });
+      await editMessage(env, chatId, messageId, `⭐ ${amount} Stars\n\n${t(lang, "enter_username_tg")}`, backHomeKeyboard(lang));
       return answerCallback(env, cq.id);
     }
 
@@ -1595,9 +1600,10 @@ async function handleCallbackQuery(env, db, cq) {
         return answerCallback(env, cq.id);
       }
       if (catKey === "tg_stars") {
-        await setState(db, userId, { step: "await_stars_username", data: {} });
+        await setState(db, userId, { step: "await_stars_choice", data: {} });
         const starsInfo = await starsPriceInfo(db, lang);
-        await editMessage(env, chatId, messageId, `${starsInfo}\n\n${t(lang, "enter_username_tg")}`, backHomeKeyboard(lang));
+        const promptText = await getEffectiveStarsPromptText(db, lang);
+        await editMessage(env, chatId, messageId, `${starsInfo}\n\n${promptText}`, starsQuickKeyboard(lang));
         return answerCallback(env, cq.id);
       }
       if (catKey === "freefire" && (await isFreefireMaintenance(db))) {
@@ -2698,28 +2704,36 @@ async function handleMessage(env, db, msg) {
     return;
   }
 
+  if (state.step === "await_stars_custom") {
+    const amount = /^\d+$/.test(text.trim()) ? parseInt(text.trim(), 10) : NaN;
+    const cat = CATALOG.tg_stars;
+    if (!Number.isFinite(amount) || amount < cat.min || amount > cat.max) {
+      await sendMessage(
+        env,
+        chatId,
+        lang === "kg"
+          ? `❌ ${cat.min}дөн ${cat.max} чейинки санды жазыңыз.`
+          : `❌ Введите число от ${cat.min} до ${cat.max}.`
+      );
+      return;
+    }
+    await setState(db, userId, { step: "await_stars_username", data: { amount } });
+    await sendMessage(env, chatId, `⭐ ${amount} Stars\n\n${t(lang, "enter_username_tg")}`, backHomeKeyboard(lang));
+    return;
+  }
+
   if (state.step === "await_stars_username") {
     if (!text.startsWith("@") || text.length < 3) {
       await sendMessage(env, chatId, t(lang, "invalid_input"));
       return;
     }
-    state.data = { username: text };
-    state.step = "await_stars_amount";
-    await setState(db, userId, state);
-    const starsInfo = await starsPriceInfo(db, lang);
-    const promptText = await getEffectiveStarsPromptText(db, lang);
-    await sendMessage(env, chatId, `${starsInfo}\n\n${promptText}`, starsQuickKeyboard(lang));
-    return;
-  }
-
-  if (state.step === "await_stars_amount") {
-    const amount = /^\d+$/.test(text.trim()) ? parseInt(text.trim(), 10) : NaN;
-    const cat = CATALOG.tg_stars;
-    if (!Number.isFinite(amount) || amount < cat.min || amount > cat.max) {
-      await sendMessage(env, chatId, t(lang, "invalid_input"));
+    const amount = state.data && state.data.amount;
+    if (!amount) {
+      await clearState(db, userId);
+      await sendMessage(env, chatId, t(lang, "main_menu"), mainMenuKeyboard(lang));
       return;
     }
-    await createStarsOrder(env, db, lang, chatId, userId, state.data.username, amount);
+    await createStarsOrder(env, db, lang, chatId, userId, text.trim(), amount);
     return;
   }
 
