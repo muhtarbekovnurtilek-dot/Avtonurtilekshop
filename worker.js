@@ -165,7 +165,7 @@ const T = {
     enter_player_id_mlbb: "Введите Player ID:",
     enter_server_id_mlbb: "Введите Server ID:",
     enter_username_tg: "Введите @username:",
-    enter_stars_amount: "Введите количество Stars (от 50 до 100000):",
+    enter_stars_amount: "Выберите количество Stars кнопкой или напишите своё (от 50 до 5000):",
     stars_rate_line: (rate) => `Курс: ${rate} сом за 1 звезду ⭐`,
     validating: "⏳ Проверяю данные...",
     service_unavailable: "⚠️ Сервис временно недоступен. Попробуйте позже.",
@@ -273,7 +273,7 @@ const T = {
     enter_player_id_mlbb: "Player ID киргизиңиз:",
     enter_server_id_mlbb: "Server ID киргизиңиз:",
     enter_username_tg: "@username киргизиңиз:",
-    enter_stars_amount: "Stars санын киргизиңиз (50дөн 100000 чейин):",
+    enter_stars_amount: "Stars санын баскыч менен тандаңыз же өзүңүз жазыңыз (50дөн 5000 чейин):",
     stars_rate_line: (rate) => `Курс: ${rate} сом 1 жылдызга ⭐`,
     validating: "⏳ Текшерилүүдө...",
     service_unavailable: "⚠️ Кызмат убактылуу жеткиликсиз. Кийинчерээк аракет кылыңыз.",
@@ -476,7 +476,8 @@ const CATALOG = {
     donixCategory: "tgstars",
     pricePerStar: 1.7,
     min: 50,
-    max: 2500, // Donix /order has no quantity field: 1 order per star is sent, so this must stay small
+    max: 5000,
+    quick: [50, 100, 250, 500, 1000, 2500], // быстрые кнопки; своё количество вводится текстом
     items: [],
   },
   tg_premium: {
@@ -540,7 +541,7 @@ function kvKeyPriceOverride(catKey, itemId) {
   return `price:${catKey}:${itemId}`;
 }
 /* Поставьте false, чтобы снова включить покупку Telegram Stars. */
-const STARS_TEMP_DISABLED = true;
+const STARS_TEMP_DISABLED = false;
 
 /* Техработы Free Fire. По умолчанию ВЫКЛЮЧЕНЫ; админ переключает командой /ffmaint on | off (без деплоя). */
 const FREEFIRE_MAINTENANCE_DEFAULT = false;
@@ -1280,6 +1281,39 @@ function pubgMenuKeyboard(lang) {
   ]);
 }
 
+function starsQuickKeyboard(lang) {
+  const q = CATALOG.tg_stars.quick;
+  const rows = [];
+  for (let i = 0; i < q.length; i += 3) {
+    rows.push(q.slice(i, i + 3).map((n) => btn(`${n} ⭐`, `stars:${n}`)));
+  }
+  rows.push([btn(t(lang, "btn_home"), "menu:home")]);
+  return ikb(rows);
+}
+
+/* Создаёт заказ на Stars (кнопка или введённое число) и показывает итог. */
+async function createStarsOrder(env, db, lang, chatId, userId, username, amount) {
+  const pricePerStar = await getEffectiveStarsPricePerStar(db);
+  const price = round2(amount * pricePerStar);
+  const uidData = { Username: username, Stars: amount };
+  const stateData = { catKey: "tg_stars", itemId: `stars_${amount}`, itemName: `${amount} ⭐ Stars`, price };
+  const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData);
+  const order = await createOrder(db, {
+    userId,
+    category: "tg_stars",
+    itemId: stateData.itemId,
+    itemName: stateData.itemName,
+    price,
+    discount: prompt.discount,
+    total: prompt.total,
+    uidData,
+    promoCode: prompt.promoCode,
+    // Без items: Stars уходят в Donix ОДНИМ заказом с quantity (см. processDonixOrderInner).
+  });
+  await clearState(db, userId);
+  await sendOrderSummary(env, db, lang, chatId, userId, order, prompt);
+}
+
 function tgMenuKeyboard(lang) {
   return ikb([
     [btn("⭐ Stars", "cat:tg_stars"), btn("💎 Premium", "cat:tg_premium")],
@@ -1463,7 +1497,7 @@ async function getEffectiveStarsPromptText(db, lang) {
 async function starsPriceInfo(db, lang) {
   const rate = await getEffectiveStarsPricePerStar(db);
   const cat = CATALOG.tg_stars;
-  const samples = [50, 100, 500, 1000]
+  const samples = [50, 100, 500, 1000, 2500]
     .filter((n) => n >= cat.min && n <= cat.max)
     .map((n) => `⭐ ${n} = ${fmtSom(round2(n * rate))} ${t(lang, "kg_som")}`);
   return [t(lang, "stars_rate_line", fmtSom(rate)), ...samples].join("\n");
@@ -1537,6 +1571,19 @@ async function handleCallbackQuery(env, db, cq) {
       } else if (a === "tg") {
         await editMessage(env, chatId, messageId, t(lang, "choose_category"), tgMenuKeyboard(lang));
       }
+      return answerCallback(env, cq.id);
+    }
+
+    if (ns === "stars") {
+      const st = await getState(db, userId);
+      const amount = parseInt(a, 10);
+      const cat = CATALOG.tg_stars;
+      if (!st || st.step !== "await_stars_amount" || !st.data || !st.data.username || !cat.quick.includes(amount)) {
+        await clearState(db, userId);
+        await editMessage(env, chatId, messageId, t(lang, "main_menu"), mainMenuKeyboard(lang));
+        return answerCallback(env, cq.id);
+      }
+      await createStarsOrder(env, db, lang, chatId, userId, st.data.username, amount);
       return answerCallback(env, cq.id);
     }
 
@@ -2069,6 +2116,9 @@ async function processDonixOrderInner(env, db, order, lang, chatId, isRetry) {
 
   const payload = { external_id: order.internalId, sku, uid };
   if (server) payload.server = server;
+  if (order.category === "tg_stars" && order.uidData && order.uidData.Stars) {
+    payload.quantity = Number(order.uidData.Stars); // Stars: один заказ на всё количество
+  }
   let result = null;
   if (isRetry) {
     const ex = await donixOrderByExternal(env, order.internalId);
@@ -2658,38 +2708,18 @@ async function handleMessage(env, db, msg) {
     await setState(db, userId, state);
     const starsInfo = await starsPriceInfo(db, lang);
     const promptText = await getEffectiveStarsPromptText(db, lang);
-    await sendMessage(env, chatId, `${starsInfo}\n\n${promptText}`);
+    await sendMessage(env, chatId, `${starsInfo}\n\n${promptText}`, starsQuickKeyboard(lang));
     return;
   }
 
   if (state.step === "await_stars_amount") {
-    const amount = parseInt(text, 10);
+    const amount = /^\d+$/.test(text.trim()) ? parseInt(text.trim(), 10) : NaN;
     const cat = CATALOG.tg_stars;
     if (!Number.isFinite(amount) || amount < cat.min || amount > cat.max) {
       await sendMessage(env, chatId, t(lang, "invalid_input"));
       return;
     }
-    const pricePerStar = await getEffectiveStarsPricePerStar(db);
-    const price = round2(amount * pricePerStar);
-    const uidData = { Username: state.data.username, Stars: amount };
-    const stateData = { catKey: "tg_stars", itemId: `stars_${amount}`, itemName: `${amount} ⭐ Stars`, price };
-    const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData);
-    const order = await createOrder(db, {
-      userId,
-      category: "tg_stars",
-      itemId: stateData.itemId,
-      itemName: stateData.itemName,
-      price,
-      discount: prompt.discount,
-      total: prompt.total,
-      uidData,
-      promoCode: prompt.promoCode,
-      // Donix /order has no quantity field, so Stars are fulfilled as `amount` separate
-      // 1-star Donix orders, reusing the same per-unit cart mechanism as other games.
-      items: [{ itemId: "star_unit", name: "1 ⭐ Star", qty: amount, price: pricePerStar }],
-    });
-    await clearState(db, userId);
-    await sendOrderSummary(env, db, lang, chatId, userId, order, prompt);
+    await createStarsOrder(env, db, lang, chatId, userId, state.data.username, amount);
     return;
   }
 
