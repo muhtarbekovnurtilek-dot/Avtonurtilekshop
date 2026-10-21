@@ -976,6 +976,21 @@ function donixErrText(result) {
 async function donixCreateOrder(env, payload) {
   return donixRequest(env, "/order", "POST", payload);
 }
+/* Telegram Stars / Premium: Donix requires POST /telegram-order (plain /order returns use_telegram_order). */
+async function donixTelegramOrder(env, payload) {
+  return donixRequest(env, "/telegram-order", "POST", payload);
+}
+async function donixTelegramCheck(env, username) {
+  return donixRequest(env, "/telegram/check", "POST", { username: String(username || "").replace(/^@/, "").trim() });
+}
+function isTelegramCategory(catKey) {
+  return catKey === "tg_stars" || catKey === "tg_premium";
+}
+/* "tgp_3m" -> 3 months */
+function premiumMonthsFromItemId(itemId) {
+  const m = String(itemId || "").match(/(\d+)m$/);
+  return m ? parseInt(m[1], 10) : null;
+}
 async function donixOrderByExternal(env, externalId) {
   return donixRequest(env, `/order/${encodeURIComponent(externalId)}?by=external`);
 }
@@ -1844,7 +1859,7 @@ async function handleCallbackQuery(env, db, cq) {
 
         await sendMessage(env, chatId, t(lang, "terminal_instructions"), {
           inline_keyboard: [
-            [{ text: t(lang, "terminal_dm_button"), url: `https://t.me/${env.ADMIN_USERNAME}?text=${encodeURIComponent(messageText)}` }],
+            [{ text: t(lang, "terminal_dm_button"), url: `https://t.me/${env.ADMIN_USERNAME || "nurt1lek_ff"}?text=${encodeURIComponent(messageText)}` }],
             [{ text: t(lang, "btn_home"), callback_data: "menu:home" }],
           ],
         });
@@ -2091,20 +2106,25 @@ async function processDonixOrderInner(env, db, order, lang, chatId, isRetry) {
   if (order.items && order.items.length > 0) {
     const created = [];
     for (const line of order.items) {
-      const sku = await resolveDonixSku(env, order.category, line.itemId, line.name);
+      const isTg = isTelegramCategory(order.category);
+      const months = isTg ? premiumMonthsFromItemId(line.itemId) : null;
+      if (isTg && !months) return failOrder(`не удалось определить срок Premium для «${line.name}» (${line.itemId})`);
+      const sku = isTg ? "telegram" : await resolveDonixSku(env, order.category, line.itemId, line.name);
       if (!sku) return failOrder(`не найден SKU для «${line.name}» (${line.itemId}). Используйте /setsku ${line.itemId} SKU`);
       const qty = Math.max(1, line.qty || 1);
       line.units = {};
       for (let i = 1; i <= qty; i++) {
         const externalId = qty > 1 ? `${order.internalId}::${line.itemId}#${i}` : `${order.internalId}::${line.itemId}`;
-        const payload = { external_id: externalId, sku, uid };
-        if (server) payload.server = server;
+        const payload = isTg
+          ? { external_id: externalId, username: uid, premium: months }
+          : { external_id: externalId, sku, uid };
+        if (!isTg && server) payload.server = server;
         let r = null;
         if (isRetry) {
           const ex = await donixOrderByExternal(env, externalId);
           if (ex.ok && ex.data) r = ex;
         }
-        if (!r) r = await donixCreateOrder(env, payload);
+        if (!r) r = isTg ? await donixTelegramOrder(env, payload) : await donixCreateOrder(env, payload);
         if (!r.ok || !r.data) return failOrder(`${line.name}: ${donixErrText(r)}`);
         line.units[String(i)] = "processing";
         created.push(r.data.order_id || r.data.id || null);
@@ -2117,20 +2137,32 @@ async function processDonixOrderInner(env, db, order, lang, chatId, isRetry) {
     return;
   }
 
-  const sku = await resolveDonixSku(env, order.category, order.itemId, order.itemName);
-  if (!sku) return failOrder(`не найден SKU для «${order.itemName}» (${order.itemId}). Используйте /setsku ${order.itemId} SKU`);
-
-  const payload = { external_id: order.internalId, sku, uid };
-  if (server) payload.server = server;
-  if (order.category === "tg_stars" && order.uidData && order.uidData.Stars) {
-    payload.quantity = Number(order.uidData.Stars); // Stars: один заказ на всё количество
+  let payload;
+  let sendFn = donixCreateOrder;
+  if (isTelegramCategory(order.category)) {
+    sendFn = donixTelegramOrder;
+    payload = { external_id: order.internalId, username: uid };
+    if (order.category === "tg_stars") {
+      const stars = Number(order.uidData && order.uidData.Stars);
+      if (!Number.isFinite(stars) || stars < 50) return failOrder(`неверное количество Stars: ${order.uidData && order.uidData.Stars}`);
+      payload.stars = stars; // Stars: один заказ на всё количество
+    } else {
+      const months = premiumMonthsFromItemId(order.itemId);
+      if (!months) return failOrder(`не удалось определить срок Premium (${order.itemId})`);
+      payload.premium = months;
+    }
+  } else {
+    const sku = await resolveDonixSku(env, order.category, order.itemId, order.itemName);
+    if (!sku) return failOrder(`не найден SKU для «${order.itemName}» (${order.itemId}). Используйте /setsku ${order.itemId} SKU`);
+    payload = { external_id: order.internalId, sku, uid };
+    if (server) payload.server = server;
   }
   let result = null;
   if (isRetry) {
     const ex = await donixOrderByExternal(env, order.internalId);
     if (ex.ok && ex.data) result = ex;
   }
-  if (!result) result = await donixCreateOrder(env, payload);
+  if (!result) result = await sendFn(env, payload);
   if (!result.ok || !result.data) return failOrder(donixErrText(result));
 
   order.donixOrderId = result.data.order_id || result.data.id || null;
@@ -2398,6 +2430,17 @@ async function buildOrderConfirmPrompt(env, db, lang, userId, stateData, uidData
   return { text: lines.join("\n"), total, discount, promoCode };
 }
 
+/* Checks a Telegram @username via Donix. Returns { state: "ok"|"invalid"|"down", name }. */
+async function checkTelegramUsername(env, username) {
+  const r = await donixTelegramCheck(env, username);
+  if (r.status === 0 || r.status === 401 || r.status === 403 || r.status === 429 || r.status >= 500) {
+    if (r.status === 401 || r.status === 403) await notifyAdminDonix(env, `проверка Telegram username: ${donixErrText(r)}`);
+    return { state: "down" };
+  }
+  if (r.ok && r.data && r.data.valid !== false) return { state: "ok", name: r.data.name || null };
+  return { state: "invalid" };
+}
+
 async function handleMessage(env, db, msg) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -2639,7 +2682,21 @@ async function handleMessage(env, db, msg) {
       uidData = { UID: uid, "Ник": playerNick };
     } else {
       // Остальные игры и Telegram: без проверки ника.
-      uidData = cat && cat.inputType === "tg_username" ? { Username: uid } : { UID: uid };
+      if (cat && cat.inputType === "tg_username") {
+        const tgCheck = await checkTelegramUsername(env, uid);
+        if (tgCheck.state === "down") {
+          await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+          await clearState(db, userId);
+          return;
+        }
+        if (tgCheck.state === "invalid") {
+          await sendMessage(env, chatId, t(lang, "invalid_input"), backHomeKeyboard(lang));
+          return;
+        }
+        uidData = { Username: uid.startsWith("@") ? uid : "@" + uid };
+      } else {
+        uidData = { UID: uid };
+      }
     }
     state.data.uidData = uidData;
     await setState(db, userId, state);
@@ -2732,6 +2789,15 @@ async function handleMessage(env, db, msg) {
       await clearState(db, userId);
       await sendMessage(env, chatId, t(lang, "main_menu"), mainMenuKeyboard(lang));
       return;
+    }
+    const tgCheck = await checkTelegramUsername(env, text.trim());
+    if (tgCheck.state === "down") {
+      await sendMessage(env, chatId, t(lang, "service_unavailable"), backHomeKeyboard(lang));
+      return;
+    }
+    if (tgCheck.state === "invalid") {
+      await sendMessage(env, chatId, t(lang, "invalid_input"), backHomeKeyboard(lang));
+      return; // состояние сохраняем: можно сразу отправить @username ещё раз
     }
     await createStarsOrder(env, db, lang, chatId, userId, text.trim(), amount);
     return;
