@@ -81,6 +81,7 @@ async function createFinikPayment(env, { amount, paymentId, redirectUrl, descrip
     // ignore parse failure
   }
   console.log("Finik create payment error", res.status, JSON.stringify(errorData));
+  if (env.DB) await logEvent(env.DB, "finik", `создание платежа: HTTP ${res.status} ${JSON.stringify(errorData)}`);
   return { ok: false, status: res.status, error: errorData };
 }
 
@@ -965,7 +966,25 @@ function donixUidFromData(uidData) {
   return String(raw).replace(/^@/, "").trim();
 }
 
+/* ================= EVENT LOG (кольцевой буфер в KV) ================= */
+
+const LOG_KEY = "log:events";
+const LOG_MAX = 50;
+
+/* Пишет событие в журнал (последние LOG_MAX записей). Никогда не бросает ошибку. */
+async function logEvent(db, type, text) {
+  try {
+    const list = (await getJSON(db, LOG_KEY, [])) || [];
+    list.unshift({ at: new Date().toISOString(), type, text: String(text).slice(0, 300) });
+    if (list.length > LOG_MAX) list.length = LOG_MAX;
+    await putJSON(db, LOG_KEY, list);
+  } catch (e) {
+    console.log("logEvent error", String(e));
+  }
+}
+
 async function notifyAdminDonix(env, text) {
+  if (env.DB) await logEvent(env.DB, "donix", text);
   if (!env.ADMIN_ID) return;
   try {
     await sendMessage(env, env.ADMIN_ID, `⚠️ Donix: ${text}`.slice(0, 3900));
@@ -2061,6 +2080,7 @@ async function processDonixOrder(env, db, order, lang, chatId, isRetry = false) 
     await processDonixOrderInner(env, db, order, lang, chatId, isRetry);
   } catch (e) {
     console.log("processDonixOrder error", order.orderNumber, String(e));
+    await logEvent(db, "error", `заказ №${order.orderNumber}: ${String(e).slice(0, 200)}`);
     await db.delete(kvKeyIdemp("donixcreate", order.internalId));
     await notifyAdminDonix(env, `заказ №${order.orderNumber}: ошибка при отправке в Donix (${String(e).slice(0, 200)}). Повтор: /retryorder ${order.orderNumber}`);
   }
@@ -3136,6 +3156,94 @@ async function adminWalletsView(db, page) {
   return { text: lines.join("\n"), keyboard: ikb(rows) };
 }
 
+/* ================= ADMIN: SETTINGS / LOGS ================= */
+
+async function adminSettingsView(env, db) {
+  const [ffMaint, markup, starRate, refPercent, ping, bal] = await Promise.all([
+    isFreefireMaintenance(db),
+    db.get("config:markup_percent"),
+    getEffectiveStarsPricePerStar(db),
+    db.get(kvKeyConfig("referral_percent")),
+    donixPing(env),
+    donixBalance(env),
+  ]);
+  const donixLine = ping.ok ? "✅ на связи" : `❌ недоступен (${donixErrText(ping)})`;
+  const balLine = bal.ok ? escHtml(JSON.stringify(bal.data)) : "—";
+  const text = [
+    "🛠 Настройки",
+    "",
+    `Техработы Free Fire: ${ffMaint ? "ВКЛЮЧЕНЫ 🛠" : "выключены ✅"}`,
+    `Наценка (/syncprices): ${markup !== null && markup !== undefined ? markup + "%" : "не задана (/syncprices 8)"}`,
+    `Курс Telegram Stars: ${starRate} сом за 1 ⭐`,
+    `Реферальный процент: ${refPercent || DEFAULT_REFERRAL_PERCENT}%`,
+    `Чат отзывов (REVIEWS_CHAT_ID): ${env.REVIEWS_CHAT_ID ? "задан ✅" : "не задан ❌"}`,
+    `Finik: ${env.FINIK_ENV === "prod" ? "prod (боевой)" : "beta (тестовый)"}`,
+    `Donix: ${donixLine}`,
+    `Баланс Donix: ${balLine}`,
+  ].join("\n");
+  const keyboard = ikb([
+    [btn(ffMaint ? "✅ Выключить техработы FF" : "🛠 Включить техработы FF", "admin:ffmaint")],
+    [btn("🔄 Обновить цены из Donix", "admin:syncnow")],
+    [btn("♻️ Обновить экран", "admin:settings")],
+    [btn("⬅️", "admin:home")],
+  ]);
+  return { text, keyboard };
+}
+
+const LOG_TYPE_ICON = { error: "🔴", donix: "🟠", finik: "💳", webhook: "📨" };
+
+async function adminLogsView(db) {
+  const lines = ["📋 Логи"];
+  const rows = [];
+
+  // 1) Проблемные заказы: failed/refunded и застрявшие в "paid" дольше 3 минут.
+  const all = await loadAllOrders(db);
+  const problems = all.filter((o) => {
+    if (o.status === "failed" || o.status === "refunded") return true;
+    if (o.status === "paid") return Date.now() - new Date(o.updatedAt || o.createdAt).getTime() > 3 * 60 * 1000;
+    return false;
+  });
+  lines.push("", `⚠️ Проблемные заказы: ${problems.length}`);
+  for (const o of problems.slice(0, 5)) {
+    const stuck = o.status === "paid";
+    lines.push(`• №${escHtml(o.orderNumber)} ${escHtml(o.itemName)} — ${fmtSom(o.total)} сом — ${stuck ? "🟡 оплачен, не ушёл в Donix" : "🔴 " + escHtml(o.status)} (${fmtDateRu(o.updatedAt || o.createdAt)})`);
+    if (stuck) rows.push([btn(`🔁 Повторить №${o.orderNumber}`, `admin:retry:${o.internalId}`)]);
+  }
+  if (problems.length > 5) lines.push(`… и ещё ${problems.length - 5}`);
+
+  // 2) Ручные изменения баланса.
+  const adj = [];
+  let cursor;
+  do {
+    const res = await db.list({ prefix: "balancehistory:", cursor });
+    for (const k of res.keys) {
+      const list = (await getJSON(db, k.name, [])) || [];
+      adj.push(...list.slice(0, 5));
+    }
+    cursor = res.list_complete ? undefined : res.cursor;
+  } while (cursor);
+  adj.sort((x, y) => String(y.at).localeCompare(String(x.at)));
+  lines.push("", "💵 Ручные изменения баланса (последние):");
+  if (adj.length === 0) lines.push("Пока нет.");
+  for (const h of adj.slice(0, 5)) {
+    lines.push(`• ${fmtDateRu(h.at)} — ${escHtml(h.userId)}: ${h.type === "topup" ? "+" : "−"}${fmtSom(h.amount)} сом (${fmtSom(h.oldBalance)} → ${fmtSom(h.newBalance)})`);
+  }
+
+  // 3) События Donix / Finik / ошибки.
+  const events = (await getJSON(db, LOG_KEY, [])) || [];
+  lines.push("", "🧾 События (последние):");
+  if (events.length === 0) lines.push("Пока нет.");
+  for (const e of events.slice(0, 12)) {
+    lines.push(`${LOG_TYPE_ICON[e.type] || "•"} ${fmtDateRu(e.at)} — ${escHtml(e.text)}`);
+  }
+
+  rows.push([btn("♻️ Обновить", "admin:logs"), btn("🗑 Очистить события", "admin:logsclear")]);
+  rows.push([btn("⬅️", "admin:home")]);
+  let text = lines.join("\n");
+  if (text.length > 3900) text = text.slice(0, 3890) + "\n…";
+  return { text, keyboard: ikb(rows) };
+}
+
 async function handleAdminCallback(env, db, cq, a, b, c, lang) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
@@ -3570,14 +3678,50 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
     const targetId = b;
     await setState(db, userId, { step: "admin_balance_deduct", data: { targetId } });
     await editMessage(env, chatId, messageId, "Введите сумму списания (сом):", ikb([[btn("⬅️", "admin:home")]]));
-  } else if (a === "settings" || a === "logs") {
-    await editMessage(
+  } else if (a === "settings") {
+    const view = await adminSettingsView(env, db);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "ffmaint") {
+    const now = await isFreefireMaintenance(db);
+    await db.put("config:ff_maintenance", now ? "off" : "on");
+    await logEvent(db, "settings", `Техработы Free Fire: ${now ? "выключены" : "включены"}`);
+    const view = await adminSettingsView(env, db);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "syncnow") {
+    const markup = await db.get("config:markup_percent");
+    if (markup === null || markup === undefined) {
+      await answerCallback(env, cq.id, "Сначала задайте наценку: /syncprices 8", true);
+      return;
+    }
+    const r = await syncPricesFromDonix(env, markup);
+    await logEvent(db, "settings", r.ok ? `Цены обновлены (${markup}%): ${r.changed}` : "Обновление цен не удалось");
+    await answerCallback(
       env,
-      chatId,
-      messageId,
-      "Этот раздел пока не настроен отдельно. Используйте «Каталог и цены» для цен, «Рефералка» для процента, «Промокоды» для скидок.",
-      ikb([[btn("⬅️", "admin:home")]])
+      cq.id,
+      r.ok ? `Обновлено: ${r.changed}${r.missing.length ? `, не найдено: ${r.missing.length}` : ""}` : "Donix недоступен",
+      true
     );
+    return;
+  } else if (a === "logs") {
+    const view = await adminLogsView(db);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "logsclear") {
+    await db.delete(LOG_KEY);
+    const view = await adminLogsView(db);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "retry") {
+    const order = await getOrder(db, b);
+    if (!order || order.status !== "paid") {
+      await answerCallback(env, cq.id, "Заказ уже не в статусе «paid».", true);
+      return;
+    }
+    await retryPaidOrder(env, db, order);
+    const after = await getOrder(db, b);
+    await logEvent(db, "settings", `Повтор заказа №${order.orderNumber}: статус «${after ? after.status : "?"}»`);
+    await answerCallback(env, cq.id, `№${order.orderNumber}: ${after ? after.status : "?"}`, true);
+    const view = await adminLogsView(db);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+    return;
   } else if (a === "topupok" || a === "topupno") {
     const topupId = b;
     const topup = await getJSON(db, `topup:${topupId}`);
@@ -4036,6 +4180,7 @@ async function routeTelegramWebhook(env, db, request) {
     }
   } catch (err) {
     console.log("telegram webhook error", err);
+    await logEvent(db, "error", `Telegram: ${String(err).slice(0, 200)}`);
   }
 
   // Telegram only cares that we return 200 fast
@@ -4048,6 +4193,7 @@ async function routeDonixWebhook(env, db, request) {
   const verification = await verifyDonixSignature(env, request, rawBody);
   if (!verification.ok) {
     console.log("donix-webhook: REJECTED —", verification.reason);
+    await logEvent(db, "webhook", `Donix вебхук отклонён: ${verification.reason}`);
     return new Response("invalid signature", { status: 401 });
   }
 
@@ -4062,12 +4208,15 @@ async function routeDonixWebhook(env, db, request) {
   console.log("donix-webhook: parsed", externalId, status);
 
   if (externalId && status) {
+    await logEvent(db, "webhook", `Donix: ${externalId} → ${status}`);
     try {
       await handleDonixStatusUpdate(env, db, externalId, status);
     } catch (e) {
       console.log("donix-webhook: handler error", String(e));
+      await logEvent(db, "error", `Donix вебхук, обработчик: ${String(e).slice(0, 200)}`);
     }
   } else {
+    await logEvent(db, "webhook", "Donix вебхук без external_id/status");
     console.log("donix-webhook: could not find external_id/status in payload");
   }
 
@@ -4118,6 +4267,7 @@ async function routePaymentWebhook(env, db, request, ctx) {
 
   const isValid = await verifyFinikWebhookSignature(env, request, rawBody, url);
   if (!isValid) {
+    await logEvent(db, "webhook", "Finik вебхук отклонён: неверная подпись");
     return new Response("invalid signature", { status: 401 });
   }
 
@@ -4142,6 +4292,7 @@ async function routePaymentWebhook(env, db, request, ctx) {
   // separate payments, which was silently swallowing every top-up after the first one.
   const first = await idempotentOnce(db, "finikwebhook", paymentId);
   if (!first) return new Response("ok", { status: 200 }); // already processed (retry-safe)
+  await logEvent(db, "webhook", `Finik: платёж ${paymentId} статус ${status || "?"}`);
 
   if (status !== "success" && status !== "succeeded") {
     return new Response("ok", { status: 200 });
