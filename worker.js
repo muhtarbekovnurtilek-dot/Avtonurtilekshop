@@ -2197,7 +2197,7 @@ async function processDonixOrderInner(env, db, order, lang, chatId, isRetry) {
 }
 
 /* called from /donix-webhook when a status update arrives */
-async function handleDonixStatusUpdate(env, db, externalId, status) {
+async function handleDonixStatusUpdate(env, db, externalId, status, force = false) {
   // Cart (multi-item) orders send one Donix order per line, tagged "<internalId>::<itemId>".
   let order = await getOrder(db, externalId);
   let cartLine = null;
@@ -2211,9 +2211,21 @@ async function handleDonixStatusUpdate(env, db, externalId, status) {
   }
   if (!order) return;
 
+  // Заказ уже закрыт (в т.ч. вручную) — поздние/повторные статусы его не откатывают.
+  if (order.status === "completed" && status === "processing") return;
+  if (order.status === "completed" && order.closedManually) return;
+
   const idempKey = `${externalId}:${status}`;
-  const first = await idempotentOnce(db, "donixstatus", idempKey);
-  if (!first) return; // already processed this exact status transition
+  if (force) {
+    // Повторная сверка из cron: пропускаем идемпотентность, но только если реально есть что чинить.
+    const needsFix = cartLine
+      ? (unitKey && cartLine.units ? cartLine.units[unitKey] !== status : cartLine.status !== status)
+      : order.status !== status;
+    if (!needsFix) return;
+  } else {
+    const first = await idempotentOnce(db, "donixstatus", idempKey);
+    if (!first) return; // already processed this exact status transition
+  }
 
   const user = await getUser(db, order.userId);
   const lang = user.lang || "ru";
@@ -2252,14 +2264,29 @@ async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user
   const factor = order.price > 0 ? order.total / order.price : 1;
   const unitRefund = round2(cartLine.price * factor);
 
+  const TERMINAL = ["completed", "failed", "refunded"];
+
   if (status === "processing") {
-    if (unitKey && cartLine.units) cartLine.units[unitKey] = "processing";
-    cartLine.status = "processing";
+    // Статус «processing» может прийти ПОСЛЕ «completed» — не затираем уже финальное состояние.
+    if (unitKey && cartLine.units) {
+      if (!TERMINAL.includes(cartLine.units[unitKey])) cartLine.units[unitKey] = "processing";
+    }
+    if (!TERMINAL.includes(cartLine.status)) cartLine.status = "processing";
     if (order.status !== "processing" && order.status !== "completed" && order.status !== "failed") {
       order.status = "processing";
     }
     await saveOrder(db, order);
     return;
+  }
+
+  // Перечитываем заказ прямо перед записью: два вебхука по разным позициям приходят почти
+  // одновременно, и без этого одна запись затирала другую (позиция оставалась «в обработке»).
+  {
+    const fresh = await getOrder(db, order.internalId);
+    if (fresh && fresh.items) {
+      order = fresh;
+      cartLine = fresh.items.find((l) => l.itemId === cartLine.itemId) || cartLine;
+    }
   }
 
   if (unitKey && cartLine.units) {
@@ -2467,6 +2494,14 @@ async function checkTelegramUsername(env, username) {
   return { state: "invalid" };
 }
 
+/* Достаёт номер заказа из команды: "/closeorder 155", "/closeorder:155", "/closeorder@bot 155",
+   "/closeorder №155", "/closeorder #155". Возвращает строку с цифрами или null. */
+function parseOrderNumArg(text, cmd) {
+  const re = new RegExp("^\\/" + cmd + "(?:@\\w+)?[\\s:=\\-]*[№#]?\\s*(\\d+)", "i");
+  const m = String(text || "").trim().match(re);
+  return m ? m[1] : null;
+}
+
 async function handleMessage(env, db, msg) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -2504,8 +2539,8 @@ async function handleMessage(env, db, msg) {
   }
 
   // Admin: /closeorder N  (order was delivered by hand -> close it, nothing is sent to Donix)
-  if (text.startsWith("/closeorder") && isAdmin(env, userId)) {
-    const num = text.split(/\s+/)[1];
+  if (/^\/closeorder/i.test(text) && isAdmin(env, userId)) {
+    const num = parseOrderNumArg(text, "closeorder");
     const o = num ? await getOrderByNumber(db, num) : null;
     if (!o) {
       await sendMessage(env, chatId, "Формат: /closeorder НОМЕР_ЗАКАЗА\nЗакрывает заказ, который вы выдали вручную.");
@@ -2521,7 +2556,10 @@ async function handleMessage(env, db, msg) {
     }
     o.status = "completed";
     o.closedManually = true;
-    if (o.items) o.items.forEach((l) => (l.status = "completed"));
+    if (o.items) o.items.forEach((l) => {
+      l.status = "completed";
+      if (l.units) Object.keys(l.units).forEach((k) => (l.units[k] = "completed"));
+    });
     await saveOrder(db, o);
     await idempotentOnce(db, "donixcreate", o.internalId); // block any later auto-send
     // Покупателю уходит тот же чек «✅ Заказ успешно выполнен», что и при автовыдаче
@@ -2561,8 +2599,8 @@ async function handleMessage(env, db, msg) {
   }
 
   // Admin: /retryorder N  (re-sends a paid order that never reached Donix)
-  if (text.startsWith("/retryorder") && isAdmin(env, userId)) {
-    const num = text.split(/\s+/)[1];
+  if (/^\/retryorder/i.test(text) && isAdmin(env, userId)) {
+    const num = parseOrderNumArg(text, "retryorder");
     const o = num ? await getOrderByNumber(db, num) : null;
     if (!o) {
       await sendMessage(env, chatId, "Формат: /retryorder НОМЕР_ЗАКАЗА\nНапример: /retryorder 125");
@@ -4231,7 +4269,10 @@ async function syncProcessingOrders(env, db) {
   for (const k of list.keys) {
     if (report.checked >= 40) break;
     const order = await getJSON(db, k.name);
-    if (!order || order.status !== "processing") continue;
+    if (!order) continue;
+    const hasOpenLine = order.items && order.items.some((l) => !["completed", "failed", "refunded"].includes(l.status));
+    // «processing» — обычный случай; «completed» с незакрытой позицией — следствие гонки вебхуков.
+    if (order.status !== "processing" && !(order.status === "completed" && hasOpenLine && !order.closedManually)) continue;
     const ids = [];
     if (order.items && order.items.length > 0) {
       for (const line of order.items) {
@@ -4253,7 +4294,7 @@ async function syncProcessingOrders(env, db) {
       }
       const { status } = extractDonixOrderInfo(r.data);
       if (status === "completed" || status === "failed" || status === "refunded") {
-        await handleDonixStatusUpdate(env, db, externalId, status);
+        await handleDonixStatusUpdate(env, db, externalId, status, true);
         report.updated++;
       }
     }
