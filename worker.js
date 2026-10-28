@@ -2145,34 +2145,46 @@ async function processDonixOrderInner(env, db, order, lang, chatId, isRetry) {
   };
 
   // Cart orders: one Donix order per unit (the API has no quantity field).
+  // Товары уходят в Donix ПО ОЧЕРЕДИ: следующий отправляется, когда предыдущий выполнен
+  // (см. sendNextQueuedUnit). Пока ждёт своей очереди, позиция в статусе "queued".
   if (order.items && order.items.length > 0) {
-    const created = [];
+    const isTg = isTelegramCategory(order.category);
     for (const line of order.items) {
-      const isTg = isTelegramCategory(order.category);
-      const months = isTg ? premiumMonthsFromItemId(line.itemId) : null;
-      if (isTg && !months) return failOrder(`не удалось определить срок Premium для «${line.name}» (${line.itemId})`);
-      const sku = isTg ? "telegram" : await resolveDonixSku(env, order.category, line.itemId, line.name);
-      if (!sku) return failOrder(`не найден SKU для «${line.name}» (${line.itemId}). Используйте /setsku ${line.itemId} SKU`);
+      if (isTg) {
+        if (!premiumMonthsFromItemId(line.itemId)) return failOrder(`не удалось определить срок Premium для «${line.name}» (${line.itemId})`);
+      } else {
+        const sku = await resolveDonixSku(env, order.category, line.itemId, line.name);
+        if (!sku) return failOrder(`не найден SKU для «${line.name}» (${line.itemId}). Используйте /setsku ${line.itemId} SKU`);
+        line.sku = sku;
+      }
       const qty = Math.max(1, line.qty || 1);
       line.units = {};
+      for (let i = 1; i <= qty; i++) line.units[String(i)] = "queued";
+      line.status = "queued";
+    }
+    let inFlight = false;
+    outer: for (const line of order.items) {
+      const qty = Math.max(1, line.qty || 1);
       for (let i = 1; i <= qty; i++) {
-        const externalId = qty > 1 ? `${order.internalId}::${line.itemId}#${i}` : `${order.internalId}::${line.itemId}`;
-        const payload = isTg
-          ? { external_id: externalId, username: uid, premium: months }
-          : { external_id: externalId, sku, uid };
-        if (!isTg && server) payload.server = server;
-        let r = null;
-        if (isRetry) {
-          const ex = await donixOrderByExternal(env, externalId);
-          if (ex.ok && ex.data) r = ex;
+        const extId = cartUnitExternalId(order, line, i);
+        const ex = isRetry ? await donixOrderByExternal(env, extId) : null;
+        if (ex && ex.ok && ex.data) {
+          // этот юнит уже есть в Donix — не создаём второй раз
+          line.units[String(i)] = "processing";
+          line.status = "processing";
+          if (extractDonixOrderInfo(ex.data).status !== "completed") inFlight = true;
+          continue;
         }
-        if (!r) r = isTg ? await donixTelegramOrder(env, payload) : await donixCreateOrder(env, payload);
+        if (inFlight) break outer;
+        const r = await sendCartUnit(env, order, line, i);
         if (!r.ok || !r.data) return failOrder(`${line.name}: ${donixErrText(r)}`);
         line.units[String(i)] = "processing";
-        created.push(r.data.order_id || r.data.id || null);
+        line.status = "processing";
+        line.donixOrderId = r.data.order_id || r.data.id || null;
+        await idempotentOnce(db, "unitsend", extId);
+        inFlight = true;
+        break outer;
       }
-      line.donixOrderId = created[created.length - 1];
-      line.status = "processing";
     }
     order.status = "processing";
     await saveOrder(db, order);
@@ -2210,6 +2222,115 @@ async function processDonixOrderInner(env, db, order, lang, chatId, isRetry) {
   order.donixOrderId = result.data.order_id || result.data.id || null;
   order.status = "processing";
   await saveOrder(db, order);
+}
+
+/* ---- Последовательная отправка позиций корзины в Donix ---- */
+function cartUnitExternalId(order, line, i) {
+  const qty = Math.max(1, line.qty || 1);
+  return qty > 1 ? `${order.internalId}::${line.itemId}#${i}` : `${order.internalId}::${line.itemId}`;
+}
+
+/* Создаёт в Donix один юнит позиции корзины. Возвращает ответ Donix ({ok, data, status}). */
+async function sendCartUnit(env, order, line, i) {
+  const uid = donixUidFromData(order.uidData);
+  const server = order.uidData && order.uidData["Server ID"] ? String(order.uidData["Server ID"]) : null;
+  const isTg = isTelegramCategory(order.category);
+  const externalId = cartUnitExternalId(order, line, i);
+  if (isTg) {
+    const months = premiumMonthsFromItemId(line.itemId);
+    if (!months) return { ok: false, status: 0, data: { error: "не определён срок Premium" } };
+    return donixTelegramOrder(env, { external_id: externalId, username: uid, premium: months });
+  }
+  const sku = line.sku || (await resolveDonixSku(env, order.category, line.itemId, line.name));
+  if (!sku) return { ok: false, status: 0, data: { error: "не найден SKU" } };
+  const payload = { external_id: externalId, sku, uid };
+  if (server) payload.server = server;
+  return donixCreateOrder(env, payload);
+}
+
+function recomputeLineStatus(line) {
+  if (!line.units) return;
+  const states = Object.values(line.units);
+  const terminal = ["completed", "failed", "refunded"];
+  if (states.every((x) => terminal.includes(x))) {
+    line.status = states.some((x) => x !== "completed") ? "failed" : "completed";
+  } else if (states.some((x) => x !== "queued" && !terminal.includes(x)) || states.some((x) => x === "completed")) {
+    line.status = "processing";
+  } else {
+    line.status = "queued";
+  }
+}
+
+/* Если юнит не выполнился — все ещё не отправленные ("queued") снимаем с очереди и возвращаем за них деньги. */
+async function abortQueuedUnits(db, order) {
+  const factor = order.price > 0 ? order.total / order.price : 1;
+  for (const line of order.items || []) {
+    if (!line.units) continue;
+    let touched = false;
+    for (const k of Object.keys(line.units)) {
+      if (line.units[k] !== "queued") continue;
+      line.units[k] = "failed";
+      touched = true;
+      const refundOk = await idempotentOnce(db, "refund", `${order.internalId}::${line.itemId}#${k}`);
+      if (refundOk) await walletRelease(db, order.userId, round2(line.price * factor), `donix_queued_cancel:${order.orderNumber}:${line.itemId}#${k}`);
+    }
+    if (touched) recomputeLineStatus(line);
+  }
+}
+
+/* Завершает заказ, когда все позиции в финальном состоянии: чек покупателю или сообщение об ошибке. */
+async function finalizeCartOrderIfDone(env, db, order, user, lang) {
+  const allDone = order.items.every((l) => ["completed", "failed", "refunded"].includes(l.status));
+  if (!allDone) {
+    await saveOrder(db, order);
+    return;
+  }
+  const anyIssue = order.items.some((l) => l.status === "failed" || l.status === "refunded");
+  order.status = anyIssue ? "failed" : "completed";
+  await saveOrder(db, order);
+  if (order.status === "completed") {
+    await sendCompletedReceipt(env, user.id, lang, order);
+  } else {
+    await restoreGiftPromo(db, order);
+    await sendMessage(env, user.id, t(lang, order.isGift ? "gift_failed" : "failed"), backHomeKeyboard(lang));
+  }
+}
+
+/* Отправляет в Donix следующий юнит из очереди — только если сейчас ни один юнит не выполняется. */
+async function sendNextQueuedUnit(env, db, order, user, lang) {
+  if (!order.items) return;
+  for (const line of order.items) {
+    if (line.units && Object.values(line.units).some((x) => x === "processing")) return; // уже что-то идёт
+  }
+  for (const line of order.items) {
+    if (!line.units) continue;
+    const keys = Object.keys(line.units).sort((a, b) => Number(a) - Number(b));
+    for (const k of keys) {
+      if (line.units[k] !== "queued") continue;
+      const extId = cartUnitExternalId(order, line, k);
+      const guard = await idempotentOnce(db, "unitsend", extId);
+      if (!guard) return; // этот юнит уже отправляли
+      const r = await sendCartUnit(env, order, line, k);
+      if (!r.ok || !r.data) {
+        await db.delete(kvKeyIdemp("unitsend", extId));
+        await notifyAdminDonix(env, `заказ №${order.orderNumber}: не удалось отправить «${line.name}» в Donix (${donixErrText(r)}). Остальное возвращено на баланс.`);
+        line.units[k] = "failed";
+        const factor = order.price > 0 ? order.total / order.price : 1;
+        const refundOk = await idempotentOnce(db, "refund", `${order.internalId}::${line.itemId}#${k}`);
+        if (refundOk) await walletRelease(db, order.userId, round2(line.price * factor), `donix_send_failed:${order.orderNumber}:${line.itemId}#${k}`);
+        recomputeLineStatus(line);
+        await abortQueuedUnits(db, order);
+        await finalizeCartOrderIfDone(env, db, order, user, lang);
+        return;
+      }
+      line.units[k] = "processing";
+      line.status = "processing";
+      line.donixOrderId = r.data.order_id || r.data.id || null;
+      order.status = "processing";
+      await saveOrder(db, order);
+      return;
+    }
+  }
 }
 
 /* called from /donix-webhook when a status update arrives */
@@ -2276,27 +2397,20 @@ async function handleDonixStatusUpdate(env, db, externalId, status, force = fals
    line's amount if it fails/gets refunded, and finalizes the order once every line has
    reached a terminal state (completed/failed/refunded). */
 async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user, lang, unitKey = null) {
-  // Refund share of one unit, respecting the promo discount applied to the whole order.
-  const factor = order.price > 0 ? order.total / order.price : 1;
-  const unitRefund = round2(cartLine.price * factor);
-
   const TERMINAL = ["completed", "failed", "refunded"];
+  // Позиция из одного юнита приходит без "#1" — приводим к единому виду.
+  if (!unitKey && cartLine.units && Object.keys(cartLine.units).length === 1) unitKey = Object.keys(cartLine.units)[0];
 
   if (status === "processing") {
-    // Статус «processing» может прийти ПОСЛЕ «completed» — не затираем уже финальное состояние.
-    if (unitKey && cartLine.units) {
-      if (!TERMINAL.includes(cartLine.units[unitKey])) cartLine.units[unitKey] = "processing";
-    }
+    // «processing» может прийти ПОСЛЕ «completed» — не затираем уже финальное состояние.
+    if (unitKey && cartLine.units && !TERMINAL.includes(cartLine.units[unitKey])) cartLine.units[unitKey] = "processing";
     if (!TERMINAL.includes(cartLine.status)) cartLine.status = "processing";
-    if (order.status !== "processing" && order.status !== "completed" && order.status !== "failed") {
-      order.status = "processing";
-    }
+    if (order.status !== "processing" && order.status !== "completed" && order.status !== "failed") order.status = "processing";
     await saveOrder(db, order);
     return;
   }
 
-  // Перечитываем заказ прямо перед записью: два вебхука по разным позициям приходят почти
-  // одновременно, и без этого одна запись затирала другую (позиция оставалась «в обработке»).
+  // Перечитываем заказ прямо перед записью, чтобы параллельные вебхуки не затирали друг друга.
   {
     const fresh = await getOrder(db, order.internalId);
     if (fresh && fresh.items) {
@@ -2305,19 +2419,15 @@ async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user
     }
   }
 
+  const factor = order.price > 0 ? order.total / order.price : 1;
+
   if (unitKey && cartLine.units) {
     cartLine.units[unitKey] = status;
     if (status === "failed" || status === "refunded") {
       const refundOk = await idempotentOnce(db, "refund", `${order.internalId}::${cartLine.itemId}#${unitKey}`);
-      if (refundOk) await walletRelease(db, order.userId, unitRefund, `donix_${status}:${order.orderNumber}:${cartLine.itemId}#${unitKey}`);
+      if (refundOk) await walletRelease(db, order.userId, round2(cartLine.price * factor), `donix_${status}:${order.orderNumber}:${cartLine.itemId}#${unitKey}`);
     }
-    const states = Object.values(cartLine.units);
-    const terminal = ["completed", "failed", "refunded"];
-    if (states.every((x) => terminal.includes(x))) {
-      cartLine.status = states.some((x) => x !== "completed") ? "failed" : "completed";
-    } else {
-      cartLine.status = "processing";
-    }
+    recomputeLineStatus(cartLine);
   } else if (status === "failed" || status === "refunded") {
     cartLine.status = status;
     const refundOk = await idempotentOnce(db, "refund", `${order.internalId}::${cartLine.itemId}`);
@@ -2328,20 +2438,18 @@ async function handleCartLineStatusUpdate(env, db, order, cartLine, status, user
     cartLine.status = "completed";
   }
 
-  const allDone = order.items.every((l) => ["completed", "failed", "refunded"].includes(l.status));
-  if (allDone) {
-    const anyIssue = order.items.some((l) => l.status === "failed" || l.status === "refunded");
-    order.status = anyIssue ? "failed" : "completed";
-    await saveOrder(db, order);
-    if (order.status === "completed") {
-      await sendCompletedReceipt(env, user.id, lang, order);
-    } else {
-      await restoreGiftPromo(db, order);
-      await sendMessage(env, user.id, t(lang, order.isGift ? "gift_failed" : "failed"), backHomeKeyboard(lang));
-    }
-  } else {
-    await saveOrder(db, order);
+  if (status === "failed" || status === "refunded") {
+    // Следующие товары из очереди не отправляем — возвращаем за них деньги.
+    await abortQueuedUnits(db, order);
+    await finalizeCartOrderIfDone(env, db, order, user, lang);
+    return;
   }
+
+  // Выполнен -> отправляем следующий товар из очереди; если очередь пуста и всё выполнено — чек покупателю.
+  await saveOrder(db, order);
+  await sendNextQueuedUnit(env, db, order, user, lang);
+  const after = await getOrder(db, order.internalId);
+  if (after && after.status !== "failed") await finalizeCartOrderIfDone(env, db, after, user, lang);
 }
 
 /* ================= TEXT MESSAGE HANDLER ================= */
@@ -3079,6 +3187,7 @@ const ADMIN_ORDER_STATUS_RU = {
 
 const ADMIN_LINE_STATUS_RU = {
   pending: "⏳ ожидает",
+  queued: "⏳ в очереди",
   processing: "🟡 в обработке",
   completed: "🟢 выполнен",
   failed: "🔴 не выполнен",
