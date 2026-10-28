@@ -1239,9 +1239,25 @@ async function getOrder(db, internalId) {
   return getJSON(db, kvKeyOrder(internalId));
 }
 async function getOrderByNumber(db, orderNumber) {
-  const internalId = await db.get(kvKeyOrderByNumber(orderNumber));
-  if (!internalId) return null;
-  return getOrder(db, internalId);
+  const num = String(orderNumber).trim();
+  let internalId = await db.get(kvKeyOrderByNumber(num));
+  if (internalId) {
+    // значение может быть сохранено как JSON-строка ("uuid" в кавычках)
+    try { const v = JSON.parse(internalId); if (typeof v === "string") internalId = v; } catch {}
+    const o = await getOrder(db, internalId);
+    if (o) return o;
+  }
+  // запасной путь: перебор всех заказов
+  let cursor;
+  do {
+    const list = await db.list({ prefix: "order:", cursor });
+    for (const k of list.keys) {
+      const o = await getJSON(db, k.name);
+      if (o && String(o.orderNumber) === num) return o;
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+  return null;
 }
 async function saveOrder(db, order) {
   order.updatedAt = new Date().toISOString();
@@ -2538,12 +2554,22 @@ async function handleMessage(env, db, msg) {
     return;
   }
 
+  // Диагностика: команда админская, а ID не совпал с ADMIN_ID
+  if (/^\/(closeorder|retryorder)/i.test(text) && !isAdmin(env, userId)) {
+    await sendMessage(env, chatId, `⛔ Команда только для админа. Ваш Telegram ID: ${userId}. Он должен совпадать с переменной ADMIN_ID в Cloudflare.`);
+    return;
+  }
+
   // Admin: /closeorder N  (order was delivered by hand -> close it, nothing is sent to Donix)
   if (/^\/closeorder/i.test(text) && isAdmin(env, userId)) {
     const num = parseOrderNumArg(text, "closeorder");
-    const o = num ? await getOrderByNumber(db, num) : null;
+    if (!num) {
+      await sendMessage(env, chatId, "Формат: /closeorder НОМЕР_ЗАКАЗА\nНапример: /closeorder 155");
+      return;
+    }
+    const o = await getOrderByNumber(db, num);
     if (!o) {
-      await sendMessage(env, chatId, "Формат: /closeorder НОМЕР_ЗАКАЗА\nЗакрывает заказ, который вы выдали вручную.");
+      await sendMessage(env, chatId, `Заказ №${num} не найден.`);
       return;
     }
     if (o.status === "completed") {
@@ -2964,7 +2990,9 @@ async function handleMessage(env, db, msg) {
 /* ================= ADMIN PANEL ================= */
 
 function isAdmin(env, userId) {
-  return String(userId) === String(env.ADMIN_ID);
+  // ADMIN_ID может содержать пробелы/кавычки или несколько ID через запятую.
+  const ids = String(env.ADMIN_ID || "").split(/[,\s;]+/).map((x) => x.replace(/["']/g, "").trim()).filter(Boolean);
+  return ids.includes(String(userId));
 }
 
 function adminMainKeyboard() {
