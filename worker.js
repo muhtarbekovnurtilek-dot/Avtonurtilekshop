@@ -129,6 +129,7 @@ const T = {
     btn_mlbb: "⚔️ Mobile Legends",
     btn_codm: "🎯 Call of Duty Mobile",
     btn_genshin: "✨ Genshin Impact",
+    btn_roblox: "🧱 Roblox",
     btn_tg: "⭐ Telegram",
     btn_games: "🎮 Игры и сервисы",
     btn_wallet: "💰 Кошелёк",
@@ -237,6 +238,7 @@ const T = {
     btn_mlbb: "⚔️ Mobile Legends",
     btn_codm: "🎯 Call of Duty Mobile",
     btn_genshin: "✨ Genshin Impact",
+    btn_roblox: "🧱 Roblox",
     btn_tg: "⭐ Telegram",
     btn_games: "🎮 Оюндар жана кызматтар",
     btn_wallet: "💰 Капчык",
@@ -1287,6 +1289,393 @@ async function idempotentOnce(db, scope, key) {
   return true;
 }
 
+/* ================= ROBLOX (коды из админки) ================= */
+
+const ROBLOX_REDEEM_URL = "https://www.roblox.com/redeem";
+const ROBLOX_DEFAULT_ROBUX = [50, 100, 275, 360, 555]; // цены задаются в админке (пока цена 0 — номинал скрыт)
+
+function rbxT(lang, ru, kg) {
+  return lang === "kg" ? kg : ru;
+}
+
+/* Включён ли Roblox в меню «Игры и сервисы». Переключается в админке. */
+async function isRobloxEnabled(db) {
+  return (await db.get("config:roblox_enabled")) !== "off";
+}
+
+async function getRobloxProducts(db) {
+  let list = await getJSON(db, "roblox:products", null);
+  if (!Array.isArray(list)) {
+    list = ROBLOX_DEFAULT_ROBUX.map((r) => ({ id: `r${r}`, robux: r, price: 0 }));
+    await putJSON(db, "roblox:products", list);
+  }
+  return list;
+}
+async function saveRobloxProducts(db, list) {
+  await putJSON(db, "roblox:products", list);
+}
+async function getRobloxCodes(db, pid) {
+  const l = await getJSON(db, `roblox:codes:${pid}`, []);
+  return Array.isArray(l) ? l : [];
+}
+async function saveRobloxCodes(db, pid, list) {
+  await putJSON(db, `roblox:codes:${pid}`, list);
+}
+function kvKeyRobloxSold(code) {
+  return `roblox:sold:${code}`;
+}
+function robloxItemName(robux) {
+  return `Roblox ${robux} Robux`;
+}
+
+/* Только то, что можно продать: есть цена И есть хотя бы один код. */
+async function getRobloxAvailable(db) {
+  const prods = await getRobloxProducts(db);
+  const out = [];
+  for (const p of prods) {
+    if (!(p.price > 0)) continue;
+    const n = (await getRobloxCodes(db, p.id)).length;
+    if (n > 0) out.push({ ...p, stock: n });
+  }
+  return out.sort((a, b) => a.robux - b.robux);
+}
+
+async function robloxShopView(db, lang) {
+  const items = await getRobloxAvailable(db);
+  const back = btn(t(lang, "btn_back"), "menu:games");
+  if (items.length === 0) {
+    return {
+      text: rbxT(
+        lang,
+        "🧱 Roblox\n\n😔 Сейчас коды закончились. Загляните чуть позже.",
+        "🧱 Roblox\n\n😔 Азыр кодтор бүттү. Бир аздан кийин кайрылыңыз."
+      ),
+      keyboard: ikb([[back]]),
+    };
+  }
+  const buttons = items.map((i) => btn(`${i.robux} R$ — ${fmtSom(i.price)} ${t(lang, "kg_som")}`, `rbx:buy:${i.id}`));
+  const rows = twoPerRow(buttons);
+  rows.push([back]);
+  return {
+    text: rbxT(
+      lang,
+      "🧱 Roblox — коды пополнения\n\nВыберите номинал. Код придёт сразу после оплаты:",
+      "🧱 Roblox — толуктоо коддору\n\nНоминалды тандаңыз. Код төлөмдөн кийин дароо келет:"
+    ),
+    keyboard: ikb(rows),
+  };
+}
+
+async function createRobloxOrder(env, db, lang, chatId, userId, prod) {
+  const itemName = robloxItemName(prod.robux);
+  const stateData = { catKey: "roblox", itemId: prod.id, itemName, price: prod.price };
+  const prompt = await buildOrderConfirmPrompt(env, db, lang, userId, stateData, {});
+  prompt.text = prompt.text.replace(/^\s+/, "");
+  const order = await createOrder(db, {
+    userId,
+    category: "roblox",
+    itemId: prod.id,
+    itemName,
+    price: prod.price,
+    discount: prompt.discount,
+    total: prompt.total,
+    uidData: {},
+    promoCode: prompt.promoCode,
+  });
+  await sendOrderSummary(env, db, lang, chatId, userId, order, prompt);
+}
+
+async function notifyAdminRoblox(env, text) {
+  const adminId = String(env.ADMIN_ID || "").split(/[,\s;]+/).map((x) => x.replace(/["']/g, "").trim()).filter(Boolean)[0];
+  if (!adminId) return;
+  try {
+    await sendMessage(env, adminId, `🧱 Roblox: ${text}`.slice(0, 3900));
+  } catch (e) {
+    console.log("notifyAdminRoblox error", String(e));
+  }
+}
+
+/* Выдача кода после оплаты (любым способом: кошелёк / банк / терминал). Вызывается из processDonixOrder. */
+async function deliverRobloxOrder(env, db, order, lang, chatId) {
+  order = (await getOrder(db, order.internalId)) || order;
+  if (order.status === "completed" || order.status === "failed" || order.status === "cancelled") return;
+  const first = await idempotentOnce(db, "donixcreate", order.internalId);
+  if (!first) return;
+
+  const pid = order.itemId;
+
+  const failOrder = async (reason) => {
+    order.status = "failed";
+    await saveOrder(db, order);
+    const refundOk = await idempotentOnce(db, "refund", order.internalId);
+    if (refundOk) await walletRelease(db, order.userId, order.total, `order_failed:${order.orderNumber}`);
+    await notifyAdminRoblox(env, `заказ №${order.orderNumber} не выполнен: ${reason}. Деньги возвращены на баланс клиента.`);
+    if (order.processingMsg && order.processingMsg.messageId) {
+      await deleteMessage(env, order.processingMsg.chatId || order.userId, order.processingMsg.messageId);
+    }
+    await sendMessage(env, order.userId, t(lang, "failed"), backHomeKeyboard(lang));
+  };
+
+  let stock = await getRobloxCodes(db, pid);
+  if (!order.robloxCodes || order.robloxCodes.length === 0) {
+    // Берём случайный код (меньше шанс, что два параллельных заказа возьмут один и тот же),
+    // пропуская коды, уже помеченные как проданные.
+    let code = null;
+    while (stock.length > 0) {
+      const i = Math.floor(Math.random() * stock.length);
+      const c = stock[i];
+      stock.splice(i, 1);
+      if (await db.get(kvKeyRobloxSold(c))) continue;
+      code = c;
+      break;
+    }
+    if (!code) {
+      await saveRobloxCodes(db, pid, stock);
+      return failOrder(`коды «${order.itemName}» закончились`);
+    }
+    order.robloxCodes = [code];
+    await saveOrder(db, order); // сначала фиксируем код за заказом...
+    await db.put(kvKeyRobloxSold(code), String(order.orderNumber));
+    await saveRobloxCodes(db, pid, stock); // ...потом убираем со склада
+  } else {
+    // повторная выдача (retry): код уже закреплён за заказом — просто убеждаемся, что его нет на складе
+    const code = order.robloxCodes[0];
+    await db.put(kvKeyRobloxSold(code), String(order.orderNumber));
+    if (stock.includes(code)) await saveRobloxCodes(db, pid, stock.filter((c) => c !== code));
+  }
+
+  order.status = "completed";
+  await saveOrder(db, order);
+  await logEvent(db, "roblox", `Заказ №${order.orderNumber}: выдан код (${order.itemName})`);
+  await sendRobloxReceipt(env, order.userId, lang, order);
+
+  // предупреждение админу, когда коды заканчиваются
+  const left = (await getRobloxCodes(db, pid)).length;
+  if (left <= 2) {
+    await notifyAdminRoblox(env, left === 0 ? `коды «${order.itemName}» закончились — номинал скрыт у клиентов.` : `осталось кодов «${order.itemName}»: ${left}.`);
+  }
+}
+
+async function sendRobloxReceipt(env, userId, lang, order) {
+  await postPurchaseToReviewsChat(env, env.DB, order);
+  if (order.processingMsg && order.processingMsg.messageId) {
+    await deleteMessage(env, order.processingMsg.chatId || userId, order.processingMsg.messageId);
+  }
+  const code = order.robloxCodes[0];
+  const text = [
+    t(lang, "completed"),
+    `№ ${order.orderNumber}`,
+    order.itemName,
+    "",
+    rbxT(lang, "🔑 Код для активации:", "🔑 Активдештирүү коду:"),
+    `<code>${escHtml(code)}</code>`,
+    rbxT(lang, "<i>Нажмите на код, чтобы скопировать.</i>", "<i>Кодду басыңыз — көчүрүлөт.</i>"),
+    "",
+    rbxT(lang, "Активация:", "Активдештирүү:"),
+    rbxT(
+      lang,
+      `1. Откройте <a href="${ROBLOX_REDEEM_URL}">roblox.com/redeem</a>`,
+      `1. <a href="${ROBLOX_REDEEM_URL}">roblox.com/redeem</a> ачыңыз`
+    ),
+    rbxT(lang, "2. Войдите в аккаунт и введите код", "2. Аккаунтка кирип, кодду киргизиңиз"),
+    rbxT(
+      lang,
+      "3. Сконвертируйте полученную валюту через кнопку «Get Robux»",
+      "3. Алынган валютаны «Get Robux» баскычы аркылуу конвертациялаңыз"
+    ),
+  ].join("\n");
+  const copyRow = [{ text: rbxT(lang, "📋 Скопировать код", "📋 Кодду көчүрүү"), copy_text: { text: String(code).slice(0, 256) } }];
+  const restRows = [
+    [{ text: rbxT(lang, "🔗 Активировать код", "🔗 Кодду активдештирүү"), url: ROBLOX_REDEEM_URL }],
+    [btn(t(lang, "btn_home"), "menu:home")],
+  ];
+  let res = await sendMessage(env, userId, text, { inline_keyboard: [copyRow, ...restRows] });
+  if (!res || !res.ok) {
+    // на случай, если клиент/Telegram не поддерживает кнопку копирования — код всё равно должен дойти
+    res = await sendMessage(env, userId, text, { inline_keyboard: restRows });
+  }
+}
+
+/* ---- Админка: Roblox ---- */
+
+async function adminRobloxView(db) {
+  const enabled = await isRobloxEnabled(db);
+  const prods = (await getRobloxProducts(db)).slice().sort((x, y) => x.robux - y.robux);
+  const lines = ["🧱 Roblox — коды", "", `В боте: ${enabled ? "ПОКАЗЫВАЕТСЯ ✅" : "СКРЫТ ⛔"}`, ""];
+  const rows = [[btn(enabled ? "⛔ Скрыть Roblox из бота" : "✅ Показать Roblox в боте", "admin:rbxtoggle")]];
+  for (const p of prods) {
+    const n = (await getRobloxCodes(db, p.id)).length;
+    const priced = p.price > 0;
+    lines.push(`${p.robux} R$ — ${priced ? fmtSom(p.price) + " сом" : "цена не задана ⚠️"} — кодов: ${n}${!priced || n === 0 ? " (клиенты не видят)" : ""}`);
+    rows.push([btn(`${p.robux} R$ · ${priced ? fmtSom(p.price) : "?"} сом · 📦 ${n}`, `admin:rbxp:${p.id}`)]);
+  }
+  if (prods.length === 0) lines.push("Номиналов пока нет.");
+  lines.push("", "Клиент видит только номиналы, у которых есть цена и хотя бы один код.");
+  rows.push([btn("➕ Добавить номинал", "admin:rbxnew")]);
+  rows.push([btn("⬅️", "admin:home")]);
+  return { text: lines.join("\n"), keyboard: ikb(rows) };
+}
+
+async function adminRobloxProductView(db, pid, notice) {
+  const prod = (await getRobloxProducts(db)).find((p) => p.id === pid);
+  if (!prod) return adminRobloxView(db);
+  const n = (await getRobloxCodes(db, pid)).length;
+  const lines = [];
+  if (notice) lines.push(notice, "");
+  lines.push(
+    `🧱 ${prod.robux} Robux`,
+    `Цена: ${prod.price > 0 ? fmtSom(prod.price) + " сом" : "не задана ⚠️"}`,
+    `Кодов в наличии: ${n}`
+  );
+  if (!(prod.price > 0) || n === 0) lines.push("", "Сейчас этот номинал скрыт у клиентов (нужна цена и хотя бы один код).");
+  return {
+    text: lines.join("\n"),
+    keyboard: ikb([
+      [btn("💰 Изменить цену", `admin:rbxprice:${pid}`), btn("🔢 Изменить Robux", `admin:rbxamount:${pid}`)],
+      [btn("➕ Добавить коды", `admin:rbxadd:${pid}`), btn("📋 Коды / удалить", `admin:rbxcodes:${pid}:0`)],
+      [btn("🗑 Удалить номинал", `admin:rbxdelprod:${pid}`)],
+      [btn("⬅️", "admin:rbx")],
+    ]),
+  };
+}
+
+const RBX_CODES_PER_PAGE = 10;
+async function adminRobloxCodesView(db, pid, page) {
+  const prod = (await getRobloxProducts(db)).find((p) => p.id === pid);
+  if (!prod) return adminRobloxView(db);
+  const codes = await getRobloxCodes(db, pid);
+  const pages = Math.max(1, Math.ceil(codes.length / RBX_CODES_PER_PAGE));
+  page = Math.min(Math.max(0, page), pages - 1);
+  const slice = codes.slice(page * RBX_CODES_PER_PAGE, (page + 1) * RBX_CODES_PER_PAGE);
+  const lines = [`📋 Коды ${prod.robux} R$ — всего ${codes.length} (стр. ${page + 1}/${pages})`, ""];
+  const rows = [];
+  slice.forEach((c, k) => {
+    const idx = page * RBX_CODES_PER_PAGE + k;
+    lines.push(`${idx + 1}. <code>${escHtml(c)}</code>`);
+    rows.push([btn(`❌ Удалить ${idx + 1}: ${c.length > 18 ? c.slice(0, 18) + "…" : c}`, `admin:rbxdel:${pid}:${idx}`)]);
+  });
+  if (codes.length === 0) lines.push("Кодов нет.");
+  const nav = [];
+  if (page > 0) nav.push(btn("◀️", `admin:rbxcodes:${pid}:${page - 1}`));
+  if (page < pages - 1) nav.push(btn("▶️", `admin:rbxcodes:${pid}:${page + 1}`));
+  if (nav.length) rows.push(nav);
+  if (codes.length > 0) rows.push([btn("🗑 Удалить ВСЕ коды", `admin:rbxclear:${pid}`)]);
+  rows.push([btn("⬅️", `admin:rbxp:${pid}`)]);
+  return { text: lines.join("\n"), keyboard: ikb(rows) };
+}
+
+async function sendAdminRobloxProduct(env, db, chatId, pid, notice) {
+  const view = await adminRobloxProductView(db, pid, notice);
+  await sendMessage(env, chatId, view.text, view.keyboard);
+}
+
+/* Обработка текстовых шагов админки Roblox. Возвращает true, если сообщение обработано. */
+async function handleAdminRobloxText(env, db, msg, state) {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const text = (msg.text || "").trim();
+  const step = state.step;
+  if (!step.startsWith("admin_rbx_")) return false;
+  const pid = state.data && state.data.pid;
+
+  if (step === "admin_rbx_price") {
+    const n = parseFloat(text.replace(",", "."));
+    if (!Number.isFinite(n) || n <= 0 || n > 1000000) {
+      await sendMessage(env, chatId, "Нужно число больше 0, например: 70 или 69.5");
+      return true;
+    }
+    const list = await getRobloxProducts(db);
+    const prod = list.find((p) => p.id === pid);
+    if (!prod) { await clearState(db, userId); await sendMessage(env, chatId, "Номинал не найден.", adminMainKeyboard()); return true; }
+    prod.price = round2(n);
+    await saveRobloxProducts(db, list);
+    await clearState(db, userId);
+    await sendAdminRobloxProduct(env, db, chatId, pid, `✅ Цена обновлена: ${fmtSom(prod.price)} сом`);
+    return true;
+  }
+
+  if (step === "admin_rbx_amount") {
+    const n = parseInt(text, 10);
+    if (!Number.isFinite(n) || n <= 0 || String(n) !== text.replace(/\s/g, "")) {
+      await sendMessage(env, chatId, "Нужно целое число Robux, например: 400");
+      return true;
+    }
+    const list = await getRobloxProducts(db);
+    const prod = list.find((p) => p.id === pid);
+    if (!prod) { await clearState(db, userId); await sendMessage(env, chatId, "Номинал не найден.", adminMainKeyboard()); return true; }
+    if (list.some((p) => p.id !== pid && p.robux === n)) {
+      await sendMessage(env, chatId, `Номинал ${n} R$ уже есть. Отправьте другое число.`);
+      return true;
+    }
+    prod.robux = n;
+    await saveRobloxProducts(db, list);
+    await clearState(db, userId);
+    await sendAdminRobloxProduct(env, db, chatId, pid, `✅ Теперь это номинал ${n} Robux`);
+    return true;
+  }
+
+  if (step === "admin_rbx_newprod") {
+    const m = text.match(/^(\d+)(?:\s*[;\s]\s*([\d.,]+))?$/);
+    if (!m) {
+      await sendMessage(env, chatId, "Неверный формат. Отправьте: КОЛИЧЕСТВО_ROBUX;ЦЕНА\nПример: 800;540");
+      return true;
+    }
+    const robux = parseInt(m[1], 10);
+    const price = m[2] ? round2(parseFloat(m[2].replace(",", "."))) : 0;
+    if (!(robux > 0) || !Number.isFinite(price) || price < 0) {
+      await sendMessage(env, chatId, "Неверные числа. Пример: 800;540");
+      return true;
+    }
+    const list = await getRobloxProducts(db);
+    if (list.some((p) => p.robux === robux)) {
+      await sendMessage(env, chatId, `Номинал ${robux} R$ уже есть. Измените его цену в списке или отправьте другое число.`);
+      return true;
+    }
+    const prod = { id: `r${robux}`, robux, price };
+    list.push(prod);
+    await saveRobloxProducts(db, list);
+    await clearState(db, userId);
+    await sendAdminRobloxProduct(env, db, chatId, prod.id, `✅ Номинал ${robux} R$ добавлен. Теперь добавьте коды.`);
+    return true;
+  }
+
+  if (step === "admin_rbx_addcodes") {
+    const incoming = text.split(/[\s,;]+/).map((c) => c.trim()).filter(Boolean);
+    if (incoming.length === 0) {
+      await sendMessage(env, chatId, "Не вижу кодов. Отправьте их текстом, каждый с новой строки.");
+      return true;
+    }
+    if (incoming.length > 500) {
+      await sendMessage(env, chatId, "Слишком много за один раз (максимум 500). Отправьте частями.");
+      return true;
+    }
+    if (incoming.some((c) => c.length > 200)) {
+      await sendMessage(env, chatId, "Один из кодов слишком длинный (больше 200 символов). Проверьте текст.");
+      return true;
+    }
+    const prods = await getRobloxProducts(db);
+    if (!prods.some((p) => p.id === pid)) { await clearState(db, userId); await sendMessage(env, chatId, "Номинал не найден.", adminMainKeyboard()); return true; }
+    // дубли ищем по всем номиналам, чтобы один код не оказался в двух местах
+    const existing = new Set();
+    for (const p of prods) for (const c of await getRobloxCodes(db, p.id)) existing.add(c);
+    const codes = await getRobloxCodes(db, pid);
+    let added = 0;
+    let dup = 0;
+    for (const c of incoming) {
+      if (existing.has(c)) { dup++; continue; }
+      existing.add(c);
+      codes.push(c);
+      added++;
+    }
+    await saveRobloxCodes(db, pid, codes);
+    await clearState(db, userId);
+    await logEvent(db, "settings", `Roblox ${pid}: добавлено кодов ${added}`);
+    await sendAdminRobloxProduct(env, db, chatId, pid, `✅ Добавлено кодов: ${added}${dup ? `\n⚠️ Пропущено дублей: ${dup}` : ""}`);
+    return true;
+  }
+  return false;
+}
+
 /* ================= KEYBOARDS / MENUS ================= */
 
 /* Chunks a flat list of buttons into rows of 2 (last row may have 1). */
@@ -1315,16 +1704,22 @@ function mainMenuKeyboard(lang) {
   ]);
 }
 
-function gamesMenuKeyboard(lang) {
+/* Roblox включён -> он встаёт рядом с Genshin, а Telegram уходит отдельной строкой внизу.
+   Roblox выключен -> Telegram снова стоит рядом с Genshin (по два в ряд). */
+async function gamesMenuKeyboard(db, lang) {
+  const rbxOn = await isRobloxEnabled(db);
   const items = [
     btn(t(lang, "btn_freefire"), "cat:freefire"),
     btn(t(lang, "btn_pubg"), "menu:pubg"),
     btn(t(lang, "btn_mlbb"), "cat:mlbb"),
     btn(t(lang, "btn_codm"), "cat:codm"),
     btn(t(lang, "btn_genshin"), "cat:genshin"),
-    btn(t(lang, "btn_tg"), "menu:tg"),
   ];
+  const tgBtn = btn(t(lang, "btn_tg"), "menu:tg");
+  if (rbxOn) items.push(btn(t(lang, "btn_roblox"), "cat:roblox"));
+  else items.push(tgBtn);
   const rows = twoPerRow(items);
+  if (rbxOn) rows.push([tgBtn]);
   rows.push([btn(t(lang, "btn_home"), "menu:home")]);
   return ikb(rows);
 }
@@ -1622,7 +2017,7 @@ async function handleCallbackQuery(env, db, cq) {
         await clearState(db, userId);
         await renderMainMenu(env, db, chatId, messageId, lang);
       } else if (a === "games") {
-        await editMessage(env, chatId, messageId, t(lang, "choose_category"), gamesMenuKeyboard(lang));
+        await editMessage(env, chatId, messageId, t(lang, "choose_category"), await gamesMenuKeyboard(db, lang));
       } else if (a === "pubg") {
         await editMessage(env, chatId, messageId, t(lang, "choose_category"), pubgMenuKeyboard(lang));
       } else if (a === "tg") {
@@ -1646,6 +2041,32 @@ async function handleCallbackQuery(env, db, cq) {
       await setState(db, userId, { step: "await_stars_username", data: { amount } });
       await editMessage(env, chatId, messageId, `⭐ ${amount} Stars\n\n${t(lang, "enter_username_tg")}`, backHomeKeyboard(lang));
       return answerCallback(env, cq.id);
+    }
+
+    if (ns === "cat" && a === "roblox") {
+      await clearState(db, userId);
+      if (!(await isRobloxEnabled(db))) {
+        await editMessage(env, chatId, messageId, t(lang, "service_unavailable"), ikb([[btn(t(lang, "btn_back"), "menu:games")]]));
+        return answerCallback(env, cq.id);
+      }
+      const view = await robloxShopView(db, lang);
+      await editMessage(env, chatId, messageId, view.text, view.keyboard);
+      return answerCallback(env, cq.id);
+    }
+
+    if (ns === "rbx" && a === "buy") {
+      const pid = b;
+      const prod = (await getRobloxProducts(db)).find((p) => p.id === pid);
+      const stock = prod ? (await getRobloxCodes(db, pid)).length : 0;
+      if (!(await isRobloxEnabled(db)) || !prod || !(prod.price > 0) || stock < 1) {
+        await answerCallback(env, cq.id, rbxT(lang, "Этого номинала сейчас нет в наличии", "Бул номинал азыр жок"), true);
+        const view = await robloxShopView(db, lang);
+        await editMessage(env, chatId, messageId, view.text, view.keyboard);
+        return;
+      }
+      await answerCallback(env, cq.id);
+      await createRobloxOrder(env, db, lang, chatId, userId, prod);
+      return;
     }
 
     if (ns === "cat") {
@@ -1993,6 +2414,9 @@ async function handleCallbackQuery(env, db, cq) {
           lines.push(`№ ${o.orderNumber}`);
           lines.push(`${o.itemName} — ${fmtSom(o.total)} ${t(lang, "kg_som")}`);
           lines.push(orderStatusLabel(lang, o.status));
+          if (o.category === "roblox" && o.status === "completed" && o.robloxCodes && o.robloxCodes.length) {
+            lines.push(`🔑 <code>${escHtml(o.robloxCodes[0])}</code>`);
+          }
           lines.push("");
         }
         await editMessage(env, chatId, messageId, lines.join("\n").trim(), backHomeKeyboard(lang));
@@ -2042,7 +2466,7 @@ async function postPurchaseToReviewsChat(env, db, order) {
     if (!first) return;
 
     const cat = CATALOG[order.category];
-    const game = cat ? cat.name : order.category;
+    const game = order.category === "roblox" ? "Roblox" : cat ? cat.name : order.category;
     const d = order.uidData || {};
     const isTelegram = order.category === "tg_stars" || order.category === "tg_premium";
 
@@ -2092,6 +2516,18 @@ async function sendCompletedReceipt(env, userId, lang, order) {
 /* Safe wrapper: if anything throws, the "already started" guard is released so the order can be
    retried (/retryorder N or the cron job) instead of being stuck in "paid" forever. */
 async function processDonixOrder(env, db, order, lang, chatId, isRetry = false) {
+  // Roblox: коды выдаются из нашего склада (админка), Donix не участвует.
+  if (order.category === "roblox") {
+    try {
+      await deliverRobloxOrder(env, db, order, lang, chatId);
+    } catch (e) {
+      console.log("deliverRobloxOrder error", order.orderNumber, String(e));
+      await logEvent(db, "error", `Roblox заказ №${order.orderNumber}: ${String(e).slice(0, 200)}`);
+      await db.delete(kvKeyIdemp("donixcreate", order.internalId));
+      await notifyAdminRoblox(env, `заказ №${order.orderNumber}: ошибка выдачи кода (${String(e).slice(0, 200)}). Повтор: /retryorder ${order.orderNumber}`);
+    }
+    return;
+  }
   try {
     await processDonixOrderInner(env, db, order, lang, chatId, isRetry);
   } catch (e) {
@@ -3111,7 +3547,7 @@ function adminMainKeyboard() {
     [btn("🎮 Каталог и цены", "admin:catalog"), btn("🎟 Промокоды", "admin:promos")],
     [btn("🤝 Рефералка", "admin:referral")],
     [btn("📢 Рассылка", "admin:broadcast"), btn("💳 Баланс Donix", "admin:donixbalance")],
-    [btn("🔗 SKU Donix", "admin:skus")],
+    [btn("🧱 Roblox (коды)", "admin:rbx"), btn("🔗 SKU Donix", "admin:skus")],
     [btn("🛠 Настройки", "admin:settings"), btn("📋 Логи", "admin:logs")],
     [btn("🏠 Главное меню", "menu:home")],
   ]);
@@ -3796,6 +4232,86 @@ async function handleAdminCallback(env, db, cq, a, b, c, lang) {
       `${base.name}\nТекущая цена: ${current} сом\n\nОтправьте новую цену (только число, в сомах):`,
       ikb([[btn("⬅️", `admin:catcat:${catKey}`)]])
     );
+  } else if (a === "rbx") {
+    await clearState(db, userId);
+    const view = await adminRobloxView(db);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "rbxtoggle") {
+    const now = await isRobloxEnabled(db);
+    await db.put("config:roblox_enabled", now ? "off" : "on");
+    await logEvent(db, "settings", `Roblox в боте: ${now ? "скрыт" : "показывается"}`);
+    const view = await adminRobloxView(db);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "rbxp") {
+    await clearState(db, userId);
+    const view = await adminRobloxProductView(db, b);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "rbxnew") {
+    await setState(db, userId, { step: "admin_rbx_newprod", data: {} });
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "Отправьте: КОЛИЧЕСТВО_ROBUX;ЦЕНА (в сомах)\nПример: 800;540\n\nЦену можно не указывать (просто 800) и задать позже.",
+      ikb([[btn("⬅️", "admin:rbx")]])
+    );
+  } else if (a === "rbxprice") {
+    await setState(db, userId, { step: "admin_rbx_price", data: { pid: b } });
+    await editMessage(env, chatId, messageId, "Отправьте новую цену в сомах (только число), например: 70", ikb([[btn("⬅️", `admin:rbxp:${b}`)]]));
+  } else if (a === "rbxamount") {
+    await setState(db, userId, { step: "admin_rbx_amount", data: { pid: b } });
+    await editMessage(env, chatId, messageId, "Отправьте новое количество Robux (целое число), например: 400", ikb([[btn("⬅️", `admin:rbxp:${b}`)]]));
+  } else if (a === "rbxadd") {
+    await setState(db, userId, { step: "admin_rbx_addcodes", data: { pid: b } });
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "Отправьте коды одним сообщением — каждый код с новой строки (можно сразу много, до 500).\nДубликаты пропускаются.",
+      ikb([[btn("⬅️", `admin:rbxp:${b}`)]])
+    );
+  } else if (a === "rbxcodes") {
+    await clearState(db, userId);
+    const view = await adminRobloxCodesView(db, b, parseInt(c, 10) || 0);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "rbxdel") {
+    const idx = parseInt(c, 10);
+    const codes = await getRobloxCodes(db, b);
+    if (Number.isInteger(idx) && idx >= 0 && idx < codes.length) {
+      codes.splice(idx, 1);
+      await saveRobloxCodes(db, b, codes);
+      await logEvent(db, "settings", `Roblox ${b}: код удалён`);
+    }
+    const view = await adminRobloxCodesView(db, b, Math.floor((Number.isInteger(idx) ? idx : 0) / RBX_CODES_PER_PAGE));
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "rbxclear") {
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "Удалить ВСЕ коды этого номинала? Это нельзя отменить.",
+      ikb([[btn("🗑 Да, удалить все", `admin:rbxclearok:${b}`), btn("Отмена", `admin:rbxcodes:${b}:0`)]])
+    );
+  } else if (a === "rbxclearok") {
+    await saveRobloxCodes(db, b, []);
+    await logEvent(db, "settings", `Roblox ${b}: все коды удалены`);
+    const view = await adminRobloxProductView(db, b, "✅ Все коды удалены");
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
+  } else if (a === "rbxdelprod") {
+    await editMessage(
+      env,
+      chatId,
+      messageId,
+      "Удалить этот номинал вместе со всеми его кодами? Это нельзя отменить.",
+      ikb([[btn("🗑 Да, удалить", `admin:rbxdelprodok:${b}`), btn("Отмена", `admin:rbxp:${b}`)]])
+    );
+  } else if (a === "rbxdelprodok") {
+    const list = (await getRobloxProducts(db)).filter((p) => p.id !== b);
+    await saveRobloxProducts(db, list);
+    await db.delete(`roblox:codes:${b}`);
+    await logEvent(db, "settings", `Roblox: номинал ${b} удалён`);
+    const view = await adminRobloxView(db);
+    await editMessage(env, chatId, messageId, view.text, view.keyboard);
   } else if (a === "broadcast") {
     await setState(db, userId, { step: "admin_broadcast", data: {} });
     await editMessage(env, chatId, messageId, "Отправьте текст рассылки:", ikb([[btn("⬅️", "admin:home")]]));
@@ -4000,6 +4516,8 @@ async function handleAdminTextInput(env, db, msg, state, lang) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const text = (msg.text || "").trim();
+
+  if (await handleAdminRobloxText(env, db, msg, state)) return;
 
   if (state.step === "admin_create_promo") {
     const parts = text.split(";").map((p) => p.trim());
