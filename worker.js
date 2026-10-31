@@ -129,7 +129,7 @@ const T = {
     btn_mlbb: "⚔️ Mobile Legends",
     btn_codm: "🎯 Call of Duty Mobile",
     btn_genshin: "✨ Genshin Impact",
-    btn_roblox: "🧱 Roblox",
+    btn_roblox: "🔲 Roblox",
     btn_tg: "⭐ Telegram",
     btn_games: "🎮 Игры и сервисы",
     btn_wallet: "💰 Кошелёк",
@@ -238,7 +238,7 @@ const T = {
     btn_mlbb: "⚔️ Mobile Legends",
     btn_codm: "🎯 Call of Duty Mobile",
     btn_genshin: "✨ Genshin Impact",
-    btn_roblox: "🧱 Roblox",
+    btn_roblox: "🔲 Roblox",
     btn_tg: "⭐ Telegram",
     btn_games: "🎮 Оюндар жана кызматтар",
     btn_wallet: "💰 Капчык",
@@ -1347,8 +1347,8 @@ async function robloxShopView(db, lang) {
     return {
       text: rbxT(
         lang,
-        "🧱 Roblox\n\n😔 Сейчас коды закончились. Загляните чуть позже.",
-        "🧱 Roblox\n\n😔 Азыр кодтор бүттү. Бир аздан кийин кайрылыңыз."
+        "🔲 Roblox\n\n😔 Сейчас коды закончились. Загляните чуть позже.",
+        "🔲 Roblox\n\n😔 Азыр кодтор бүттү. Бир аздан кийин кайрылыңыз."
       ),
       keyboard: ikb([[back]]),
     };
@@ -1359,8 +1359,8 @@ async function robloxShopView(db, lang) {
   return {
     text: rbxT(
       lang,
-      "🧱 Roblox — коды пополнения\n\nВыберите номинал. Код придёт сразу после оплаты:",
-      "🧱 Roblox — толуктоо коддору\n\nНоминалды тандаңыз. Код төлөмдөн кийин дароо келет:"
+      "🔲 Roblox — коды пополнения\n\nВыберите номинал. Код придёт сразу после оплаты:",
+      "🔲 Roblox — толуктоо коддору\n\nНоминалды тандаңыз. Код төлөмдөн кийин дароо келет:"
     ),
     keyboard: ikb(rows),
   };
@@ -1389,7 +1389,7 @@ async function notifyAdminRoblox(env, text) {
   const adminId = String(env.ADMIN_ID || "").split(/[,\s;]+/).map((x) => x.replace(/["']/g, "").trim()).filter(Boolean)[0];
   if (!adminId) return;
   try {
-    await sendMessage(env, adminId, `🧱 Roblox: ${text}`.slice(0, 3900));
+    await sendMessage(env, adminId, `🔲 Roblox: ${text}`.slice(0, 3900));
   } catch (e) {
     console.log("notifyAdminRoblox error", String(e));
   }
@@ -1501,7 +1501,7 @@ async function sendRobloxReceipt(env, userId, lang, order) {
 async function adminRobloxView(db) {
   const enabled = await isRobloxEnabled(db);
   const prods = (await getRobloxProducts(db)).slice().sort((x, y) => x.robux - y.robux);
-  const lines = ["🧱 Roblox — коды", "", `В боте: ${enabled ? "ПОКАЗЫВАЕТСЯ ✅" : "СКРЫТ ⛔"}`, ""];
+  const lines = ["🔲 Roblox — коды", "", `В боте: ${enabled ? "ПОКАЗЫВАЕТСЯ ✅" : "СКРЫТ ⛔"}`, ""];
   const rows = [[btn(enabled ? "⛔ Скрыть Roblox из бота" : "✅ Показать Roblox в боте", "admin:rbxtoggle")]];
   for (const p of prods) {
     const n = (await getRobloxCodes(db, p.id)).length;
@@ -1523,7 +1523,7 @@ async function adminRobloxProductView(db, pid, notice) {
   const lines = [];
   if (notice) lines.push(notice, "");
   lines.push(
-    `🧱 ${prod.robux} Robux`,
+    `🔲 ${prod.robux} Robux`,
     `Цена: ${prod.price > 0 ? fmtSom(prod.price) + " сом" : "не задана ⚠️"}`,
     `Кодов в наличии: ${n}`
   );
@@ -3547,7 +3547,7 @@ function adminMainKeyboard() {
     [btn("🎮 Каталог и цены", "admin:catalog"), btn("🎟 Промокоды", "admin:promos")],
     [btn("🤝 Рефералка", "admin:referral")],
     [btn("📢 Рассылка", "admin:broadcast"), btn("💳 Баланс Donix", "admin:donixbalance")],
-    [btn("🧱 Roblox (коды)", "admin:rbx"), btn("🔗 SKU Donix", "admin:skus")],
+    [btn("🔲 Roblox (коды)", "admin:rbx"), btn("🔗 SKU Donix", "admin:skus")],
     [btn("🛠 Настройки", "admin:settings"), btn("📋 Логи", "admin:logs")],
     [btn("🏠 Главное меню", "menu:home")],
   ]);
